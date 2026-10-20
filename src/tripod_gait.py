@@ -56,13 +56,24 @@ def foot_targets(t_s, nominal_feet_base, commanded_vx, commanded_vy,
     should be those of a safe standing pose. No joint feasibility guarantee.
     Walking velocity is a *command*; achieved velocity comes from simulation.
     """
+    return foot_targets_by_phase(cfg.frequency_hz * t_s, nominal_feet_base,
+                                 commanded_vx, commanded_vy, commanded_yaw_rate, cfg)
+
+
+def foot_targets_by_phase(phase_cycles, nominal_feet_base, commanded_vx, commanded_vy,
+                          commanded_yaw_rate, cfg: TripodConfig):
+    """Same gait but with a continuous accumulated cycle phase.
+
+    Use this entrypoint when gait frequency changes online: frequency*t would
+    cause a phase jump. Accumulated phase is supplied by ContinuousPhaseClock.
+    """
     cfg.validate()
     feet = np.asarray(nominal_feet_base, dtype=float)
     if feet.shape != (6,3) or not np.isfinite(feet).all():
         raise ValueError('nominal_feet_base must be finite (6,3)')
-    if not np.isfinite([t_s,commanded_vx,commanded_vy,commanded_yaw_rate]).all():
+    if not np.isfinite([phase_cycles,commanded_vx,commanded_vy,commanded_yaw_rate]).all():
         raise ValueError('time and commands must be finite')
-    phase = (cfg.frequency_hz*t_s+TRIPOD_PHASE) % 1.0
+    phase = (phase_cycles+TRIPOD_PHASE) % 1.0
     support = phase < cfg.duty_factor
     beta = cfg.duty_factor
     swing_norm = (phase-beta)/(1-beta)
@@ -81,3 +92,15 @@ def foot_targets(t_s, nominal_feet_base, commanded_vx, commanded_vy,
         soft_shape = np.sin(np.pi*ss)**(2+2*cfg.touchdown_softness)
         out[~support,2] += cfg.swing_height_m*soft_shape
     return out, support
+
+
+@dataclass
+class ContinuousPhaseClock:
+    """Unwrapped phase, differentiable in time across frequency changes."""
+    cycles: float = 0.0
+
+    def advance(self, dt_s: float, frequency_hz: float) -> float:
+        if not np.isfinite([dt_s, frequency_hz]).all() or dt_s <= 0 or frequency_hz <= 0:
+            raise ValueError('Bad gait timestep/frequency')
+        self.cycles += float(dt_s * frequency_hz)
+        return self.cycles
