@@ -1,18 +1,20 @@
-# Local environments and secrets
-.env
-.env.*
-!.env.example
+# Python
+__pycache__/
+.pytest_cache/
+*.py[cod]
 .venv/
 venv/
-*.pem
-*.key
-__pycache__/
-*.py[cod]
-.pytest_cache/
 .mypy_cache/
 .ruff_cache/
-
-# Simulation logs, datasets, sensitive videos, models
+# Temporary LaTeX artifacts
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.fdb_latexmk
+*.fls
+# Experimental data, non-public videos, checkpoints, binary dumps
 runs/
 outputs/
 data/raw/
@@ -26,16 +28,10 @@ checkpoints/
 *.mp4
 *.avi
 *.mkv
-
-# LaTeX build byproducts
-*.aux
-*.log
-*.out
-*.toc
-*.synctex.gz
-*.fdb_latexmk
-*.fls
-
-# Keep unpublished draft PDF out of this public repo
-paper/*.pdf
+# local environment, secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
 .DS_Store

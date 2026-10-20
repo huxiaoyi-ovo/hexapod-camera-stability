@@ -1,0 +1,1 @@
+trial_id,terrain_family,terrain_seed,route_id,method,gait_frequency_hz,gait_duty_factor,touchdown_softness,command_speed_mps,actual_speed_mps,distance_m,duration_s,success,image_jitter_rms_px_per_frame,exposure_path_px,tag_center_rmse_px,tag_detection_rate,roll_rms_rad,pitch_rms_rad,z_rms_m,min_foot_clearance_m,slip_distance_m,solver_ms,notes

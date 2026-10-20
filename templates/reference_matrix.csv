@@ -1,0 +1,14 @@
+paper,doi,venue,mechanism,evidence_level,overlap
+Shaw 2019,10.1109/ICRA.2019.8794313,ICRA,"6-DoF body pose, CPG, gaze tracking",A,Highly direct
+Bazeille 2017,10.1017/S0263574715000909,Robotica,IMU gimbal stabilization,B,Application precedent
+Smart Gait 2024,10.1186/s10033-024-01000-0,CJME,"Swing dynamics, timing, duty, online gait",A,Very high
+Yu 2025,10.3390/machines13090871,Machines,Terrain CoM-body pose optimization,A,High
+Chen 2026,10.1177/09544062251414895,PIME C,IMU-to-gait parameter adaptation,B,High
+Coelho 2024,,Robotica,Irregular terrain body pose control,B,High
+PAMPC 2018,10.1109/IROS.2018.8593739,IROS,Image-plane velocity perception-aware MPC,A,High
+PANTHER 2022,10.1109/ACCESS.2022.3154037,IEEE Access,FOV and blur-aware UAV motion planning,A,High
+Robic 2024,10.1109/LRA.2024.3451394,RA-L,Motion-blur constrained visual servoing,B,High
+Gao 2022,10.3390/drones6090246,Drones,Hexapod constrained MPC,A,Venue+methods
+Chen/Hong 2023,10.3390/drones7050329,Drones,Legged robot vision/LiDAR,A,Venue+motivation
+Sui 2024,10.3390/drones8100554,Drones,Quadruped UGV MPC/WBC + fuzzy pursuit,A,Venue+design
+Zhang 2026,10.3390/drones10050392,Drones,Underwater quadruped contact mechanics,A,Venue+validation

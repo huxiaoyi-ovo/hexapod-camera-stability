@@ -1,32 +1,65 @@
-# Hexapod Camera Stability
+# Hexapod Camera Stability — Machines Research
 
-Research workspace for camera-stable hexapod locomotion on uneven terrain.
+**Working title:** *Compensation-Aware Gait Adaptation for Camera-Stable Hexapod Locomotion on Uneven Terrain*  
+**Target journal:** Machines (MDPI) · **Research mode:** simulation-first, hardware-assisted  
+**Research platform:** [huxiaoyi-ovo/Pcrnet_hexapod](https://github.com/huxiaoyi-ovo/Pcrnet_hexapod)
 
-- **Target journal:** *Machines* (MDPI)
-- **Research mode:** simulation-first, with limited real-robot verification
-- **Base platform:** [Pcrnet_hexapod](https://github.com/huxiaoyi-ovo/Pcrnet_hexapod)
-- **Status:** active research; performance results not yet established
+## Research question
 
-## Repository policy
+For a rigidly mounted camera on an uneven-terrain hexapod, can gait parameters be selected using **predicted residual image motion after the response of an actual, fixed body-pose compensator**, rather than selecting the gait with the smallest raw body disturbance?
 
-This repository is currently **public**. Only a public-safe project scaffold is present.
-Unpublished manuscript material, unvalidated algorithms, experimental traces, calibration data,
-videos, and checkpoints are intentionally withheld until the owner reviews repository visibility.
+The two working technical contributions are (1) gait-conditioned prediction of disturbance and closed-loop compensation response, and (2) real-time constrained scheduling of a small candidate gait set using predicted *residual* image motion and locomotion constraints. Both are **hypotheses under study**, not verified performance claims.
 
-## Planned directories
+## Scope
 
-- `src/` — gait and compensation algorithms
-- `integration/` — PCR-Net Isaac Gym integration
-- `scripts/` — experiment and evaluation tooling
-- `tests/` — offline and simulation tests
-- `docs/` — protocols and development decisions
-- `paper/` — manuscript sources
-- `figures/` — reproducible figure generation
+- Reuse the PCR-Net hexapod model, Isaac Gym/PhysX, and D435i/ROS hardware interface.
+- The low-level gait generator may be redesigned; no need to retrain PCR-Net Follow/Avoid.
+- Generate training/validation/test data **in simulation only**. Split by terrain instances and seeds, not neighboring frames.
+- Use fixed body compensation controller with measured/simulated bandwidth, contact, joint, and motor constraints.
+- Maintain comparable *achieved* speeds for all baselines. Compare residual image motion, not total scene optical flow.
+- Use short hardware sequences only for frozen-policy execution and RGB/IMU validation.
 
-## Research integrity
+## Current engineering status (2026-10-20)
 
-Simulation claims must be supported by actual Isaac Gym rollouts. Do not treat unit-test results
-as robot-level evidence. Comparisons will control achieved walking speed and use the same
-compensation controller and candidate gait set.
+**Available:** numeric proof-of-interface code for a parameterized tripod gait, pinhole image-motion residual calculation, candidate scoring, simulated state logging, trial-window construction, motor-action conversion, and lightweight response surrogate; LaTeX manuscript work draft; unit tests.
 
-See [repository status](docs/STATUS.md).
+**Not yet available:** working PCR-Net gait/IK/stance compensation closed-loop rollout in Isaac Gym; validated contact/motor response calibration; learned surrogate trained on actual Isaac Gym rollouts; any study performance numbers or real-robot experiments.
+
+The repository does **not** contain fabricated Results. A successful unit test is not evidence of gait stability or camera improvement.
+
+## Start here
+
+1. Read [simulation-first experiment protocol](docs/17_SIMULATION_FIRST_RESEARCH_PROTOCOL.md).
+2. Read [PCR-Net local integration task](docs/18_LOCAL_ISAAC_GYM_INTEGRATION_TASK.md).
+3. Read [revised core method](docs/16_REVISED_CORE_METHOD_AND_EXECUTION.md).
+4. Implement gait/IK and a fixed compensation controller inside a separate experimental task on `Pcrnet_hexapod`. Do not modify the mature PCR-Net Follow/Avoid policy pipeline.
+5. Record paired compensation-on/off trials, train and evaluate the residual response model, and run speed-matched baselines.
+
+## Repository layout
+
+```text
+src/           Numerical algorithms, camera metrics and PCR simulation adapters
+scripts/       Log processing and response-model evaluation
+integration/   Adapter contracts for PCR-Net
+paper/         LaTeX manuscript work draft (Results intentionally incomplete)
+docs/          Research protocol, method, references, integration tasks
+tests/         Offline numeric and interface tests
+figures/       Method diagram assets, not experimental evidence
+templates/     Trial, camera and paper metadata examples
+```
+
+## Run offline unit tests
+
+```bash
+python -m pip install -r requirements-core.txt
+PYTHONPATH=src python -m pytest -q tests/
+```
+
+These tests do not require Isaac Gym. Running the dynamics integration requires installing and configuring the original PCR-Net environment separately.
+
+## Data and paper ethics
+
+- Do not commit robot credentials, API tokens, raw human videos, private identifying data or unpublished PCR-Net review material to a public repository.
+- Keep model checkpoints and bulk motion/video datasets outside Git unless later deliberately versioned.
+- Only quote measured/simulated results when complete reproducible data are available.
+- No license is granted until the owner decides how the research code should be released.

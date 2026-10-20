@@ -1,0 +1,13 @@
+{
+  "NOTE": "EXAMPLE ONLY; log_csv and trial_id must come from actual simulator rollouts.",
+  "trials": [
+    {"trial_id": "trial_off", "log_csv": "rollouts/trial_off.csv", "predecision": {
+      "frequency_hz": 1.5,"duty_factor": 0.6,"step_length_m": 0.08,"swing_height_m": 0.06,
+      "touchdown_softness": 0.5,"desired_speed_mps": 0.15,"roughness_est_m": 0.02,
+      "slope_est_rad": 0.0,"planned_stance_count": 3,"predicted_joint_headroom": 0.5,
+      "phase_rad": 0.0,"roll_rate_rad_s": 0.0,"pitch_rate_rad_s": 0.0,
+      "previous_frequency_hz": 1.5,"previous_duty_factor": 0.6,
+      "previous_touchdown_softness": 0.5,"time_since_gait_change_s": 1.0
+    }}
+  ]
+}

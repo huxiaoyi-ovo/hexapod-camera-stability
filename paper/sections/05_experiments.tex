@@ -1,0 +1,49 @@
+\section{Experimental Setup}\label{sec:experiments}
+\subsection{Platform and terrain conditions}
+The primary evidence will be obtained from the existing PCR-Net 18-DOF hexapod model and Isaac Gym/PhysX dynamics environment, with calibrated camera optical-frame extrinsics. Disturbance-response model development, identification, gait scheduling, ablations and held-out terrain evaluations will all use simulation data only. Robot dimensions, mass, actual control frequency, joint gains, contact parameters and camera calibration are \todoexp{verify exact values and commit identifiers from experiment configuration}. Four terrain families are specified: horizontal flat ground, slopes, procedurally uneven ground and discrete obstacle strips. Difficulty and terrain seeds must be defined before collecting final method comparisons.
+
+A deliberately limited sim-to-real assessment will use the existing physical hexapod carrying an Intel RealSense D435i and an IMU. The model parameters and gait menu will be frozen before the physical evaluation; recorded physical video will not be used to train the response predictor. RGB and IMU timestamps will be synchronized and camera exposure settings fixed or logged. The RGB stream provides an independent measured image-motion metric rather than treating attitude alone as a measure of image quality.
+
+\subsection{Baselines and equal-compute comparisons}
+\begin{table}[ht]
+\centering\small
+\caption{Required control comparisons. All comparisons use the same robot, navigation commands, feasible gait menu where applicable, and camera calibration.}\label{tab:baselines}
+\begin{tabular}{@{}p{0.12\linewidth}p{0.52\linewidth}p{0.27\linewidth}@{}}
+\toprule
+ID & Control strategy & What it tests \\
+\midrule
+B0 & Fixed tripod gait, no body compensation & Raw reference \\
+B1 & Fixed tripod gait + IMU pose stabilization & Standard body compensation \\
+B2 & Best train-terrain fixed gait + same body stabilizer & Adaptation necessity \\
+B3 & Online gait selector minimizing raw body disturbance + same stabilizer & Raw-motion optimization \\
+B4 & Online gait selector minimizing uncompensated image motion + same stabilizer & Image cost alone \\
+B5 & Residual-image selector using gait-independent closed-loop response estimate & Candidate-specific response value \\
+B6 & History-only tuning using measured residual image motion + same body stabilizer & Predictive vs. reactive adaptation \\
+Ours & Candidate-specific measured-response prediction + residual-image gait selection & Full proposed mechanism \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The optimized fixed gait B2 is selected using \emph{training terrains only}, not the test terrains. B3--B6 and Ours receive comparable state information and candidate budgets. To avoid unbalanced computational advantage, we record the number of candidates and measured average/worst-case runtime of the selectors.
+
+\subsection{Image quality, motion and feasibility metrics}
+The primary metric is per-frame RMS unwanted image displacement $E_{\mathrm{jitter}}$, computed with projected static scene features relative to the commanded smooth camera motion. A genuinely recorded RGB metric independently tracks fixed scene features (or fiducial markers) and estimates the corresponding undesired image displacement, with moving-object features excluded. This is essential to rule out improvement caused only by inaccuracies in a modeled image metric.
+
+Additional image outcomes include exposure-period projected path length (proxy, not physical blur), real-frame feature tracking inlier rate, loss rate for a stationary visual landmark and, where calibrated and feasible, actual image sharpness indicators. Motion outcomes include achieved travel speed, path progress, time to completion, terrain success, minimum stance stability margin, foot clearance, joint feasibility violations and contact slippage. The change in speed between methods is explicitly reported; methods with meaningfully different achieved speeds are not interpreted as equal locomotion alternatives.
+
+\subsection{Paired trials and train/test separation}
+All principal comparisons are performed in Isaac Gym; physical evaluation is not required for training or full multi-terrain benchmarking. Every simulation baseline is evaluated on common terrain seeds, navigation commands, and initial conditions. The unit of replication is an independent rollout or terrain seed, not an individual frame. Model selection and gait tuning use separate training seeds, and a held-out set of terrain instances is locked before final comparisons. A practical protocol is 4 terrain families $\times$ 10 held-out terrain seeds $\times$ 8 methods, subject to actual compute availability; the exact final sample count will be reported without inflating it using correlated video frames.
+
+For each paired condition, we will report median and interquartile range or mean and dispersion as appropriate, together with paired confidence intervals based on independent run units. Individual failures and feasibility violations will be included, not deleted as inconvenient outliers. The speed-matched relative jitter reduction versus the strongest comparator is
+\begin{equation}
+\Delta_{\mathrm{jit}}=100\%\left(1-\frac{E_{\mathrm{jitter}}^{\mathrm{Ours}}}{E_{\mathrm{jitter}}^{\mathrm{comparator}}}\right).
+\end{equation}
+No target improvement percentage is claimed as an observed result.
+
+\subsection{Ablations and disturbance-model fidelity}
+Four focused ablations test the new mechanism: (A1) candidate ranking uses raw disturbance instead of residual; (A2) all candidates share a fixed correction budget; (A3) gait-conditional disturbance prediction is replaced with a candidate-independent prediction; and (A4) actuator response limits are omitted. A1 and A2 are especially important because they isolate the two ingredients of compensation-aware gait ranking.
+
+Prediction accuracy will be measured on held-out terrain using normalized camera-twist errors, projected residual pixel-motion errors and \emph{candidate ranking accuracy}. Only predicting average raw motion is inadequate if the optimizer cannot distinguish the better candidate. Across eligible held-out candidate pairs, we report the prevalence of raw-versus-compensated ranking reversals and the improvement from compensation-conditioned selection, rather than only showcasing one favorable example. Controller-on and controller-off trials are paired by scenario and gait, but need not have identical subsequent trajectories. In addition, simulations will vary motor response and latency, foot--ground friction and contact parameters within calibrated or explicitly documented uncertainty ranges. Ground-truth future contact forces are used only for offline diagnostics, never as online gait-selector features.
+
+\subsection{Physical camera assessment}
+The reduced physical-robot study will compare B2 (optimized fixed gait), B3 (raw-disturbance gait selection), and Ours on level floor with a mild disturbance and one representative safe uneven surface, with repeated traversals under comparable measured speeds and the same exposure settings. The initial plan is three methods, two environments and three repetitions (18 recorded sequences); the final replication count will follow observed variability and will be stated explicitly. The response model is trained exclusively on simulation data and will not be re-fitted using these physical trials. At minimum, it should provide synchronized IMU and RGB trajectories, estimated static-scene jitter, achieved speed and task completion records. Distortions arising from rolling-shutter timing must be acknowledged; a kinematic exposure-path proxy must not be presented as actual measured blur without additional image evidence.

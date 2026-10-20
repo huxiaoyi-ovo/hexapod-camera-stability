@@ -1,0 +1,55 @@
+% Machines-targeted research manuscript work draft, 2026-10-20.
+% Free-format FIRST submission is permitted by Machines author instructions.
+% Before submission: migrate to official MDPI LaTeX template and confirm all metadata.
+% Every item marked DATA REQUIRED must be resolved from real logged evidence.
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.35cm]{geometry}
+\usepackage{amsmath,amssymb,bm,graphicx,booktabs,multirow,array,xcolor,hyperref}
+\usepackage{enumitem}
+\usepackage{caption}
+\setlength{\parskip}{0.34em}
+\setlength{\parindent}{0pt}
+\hypersetup{colorlinks=true,urlcolor=blue,linkcolor=blue,citecolor=blue}
+\newcommand{\SE}{\mathrm{SE}(3)}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\Img}{J_{\mathrm{img}}}
+\newcommand{\todoexp}[1]{\textcolor{red!70!black}{\textbf{[DATA REQUIRED: #1]}}}
+\title{Compensation-Aware Gait Adaptation for Camera-Stable Hexapod Locomotion on Uneven Terrain}
+\author{Author names and affiliations pending author confirmation}
+\date{Internal research draft --- 20 October 2026 --- not for submission}
+\begin{document}
+\maketitle
+\begin{abstract}
+Uneven-terrain locomotion introduces gait-synchronous camera motion that can affect visual sensing on hexapod robots with rigidly mounted cameras. Body-pose stabilization can attenuate some of this disturbance, but its achievable correction depends on support contacts, joint workspace, and actuator response. We investigate a gait selection principle that evaluates candidate gaits according to the \emph{predicted residual image-plane disturbance after feasible body compensation}, rather than the disturbance before compensation. The proposed framework evaluates gait candidates through a lightweight, gait-conditioned model of raw image disturbance and the achieved closed-loop response of a fixed body stabilizer. A supervisory controller selects gait frequency, stance duty factor, and a touchdown-profile parameter under locomotion progress, foot-clearance, contact and joint limits. Image-space residual motion is separated from the expected optical flow of the navigation task. The planned evaluation comprises paired multi-terrain dynamics simulations, strong fixed-gait and sequential-optimization baselines, and synchronized camera--IMU robot demonstrations. \textbf{This is a methods-first manuscript draft; quantitative outcome statements must be added only after actual experiments.}
+\end{abstract}
+\noindent\textbf{Keywords:} hexapod locomotion; adaptive gait; visual stability; body-pose compensation; image motion; constrained optimization.
+\input{sections/01_introduction}
+\input{sections/02_related_work}
+\input{sections/03_problem}
+\input{sections/04_method}
+\input{sections/05_experiments}
+\input{sections/06_results}
+\input{sections/07_discussion}
+\section{Conclusions}
+A conclusion reporting performance will be written once comparative dynamics and physical-camera measurements have been obtained. The intended scientific question concerns the value of candidate-specific \emph{remaining} image motion under feasible body compensation, not the general possibility of visual feedback or gait adaptation.
+\section*{Author Contributions}
+\todoexp{confirm actual authors and CRediT roles.}
+\section*{Funding}
+\todoexp{provide verified grant names and identifiers; do not invent.}
+\section*{Institutional Review Board and Informed Consent Statements}
+Not applicable to robot-only experiments unless the final study includes identifiable human participants.
+\section*{Data Availability Statement}
+\todoexp{decide reproducible repository, datasets and camera logs with all coauthors.}
+\section*{Conflicts of Interest}
+\todoexp{confirm with all authors.}
+\begin{thebibliography}{20}
+\bibitem{shaw2019} Shaw, S.; Sartoretti, G.; Olkin, J.; Paivine, W.; Choset, H. Workspace CPG with Body Pose Control for Stable, Directed Vision during Omnidirectional Locomotion. \emph{Proc. IEEE Int. Conf. Robot. Autom.} \textbf{2019}, 6316--6322. \url{https://doi.org/10.1109/ICRA.2019.8794313}.
+\bibitem{saggar2007} Saggar, M.; D'Silva, T.; Kohl, N.; Stone, P. Autonomous Learning of Stable Quadruped Locomotion. In \emph{RoboCup 2006: Robot Soccer World Cup X}; Springer, \textbf{2007}, 98--109. \url{https://doi.org/10.1007/978-3-540-74024-7_9}.
+\bibitem{yin2024} Yin, Y.; Gao, F.; Sun, Q.; Zhao, Y.; Xiao, Y. Smart Gait: A Gait Optimization Framework for Hexapod Robots. \emph{Chin. J. Mech. Eng.} \textbf{2024}, \emph{37}, 15. \url{https://doi.org/10.1186/s10033-024-01000-0}.
+\bibitem{burkus2022} Burkus, E.; Odry, A.; Awrejcewicz, J.; Kecskes, I.; Odry, P. Mechanical Design and a Novel Structural Optimization Approach for Hexapod Walking Robots. \emph{Machines} \textbf{2022}, \emph{10}, 466. \url{https://doi.org/10.3390/machines10060466}.
+\bibitem{yu2025} Collaborative Optimization Control of Gravity Center and Pose of Hexapod Robot in Complex Terrains. \emph{Machines} \textbf{2025}, \emph{13}, 871. \url{https://doi.org/10.3390/machines13090871}.
+\bibitem{liu2026} Liu, R.; Zhu, J.; Su, M.; Gu, X.; Fang, S.; Zheng, D.; Yang, H. Trajectory Tracking of Underwater Hexapod Robot Based on Model Predictive Control. \emph{Machines} \textbf{2026}, \emph{14}, 171. \url{https://doi.org/10.3390/machines14020171}.
+\bibitem{gao2022} Gao, Q.; Xue, J.; Yan, H. Synergistic Motion Stability of a Scorpion-like Composite Robot. \emph{Machines} \textbf{2022}, \emph{10}, 834. \url{https://doi.org/10.3390/machines10100834}.
+\bibitem{robic2024} Robic, M.; Fraisse, R.; Marchand, E.; Chaumette, F. QP-Based Visual Servoing Under Motion Blur-Free Constraint. \emph{IEEE Robot. Autom. Lett.} \textbf{2024}, \emph{9}, 8738--8745. \url{https://doi.org/10.1109/LRA.2024.3451394}.
+\end{thebibliography}
+\end{document}

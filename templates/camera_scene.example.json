@@ -1,0 +1,16 @@
+{
+  "camera": {
+    "fx": 600.0,
+    "fy": 600.0,
+    "cx": 320.0,
+    "cy": 240.0,
+    "exposure_s": 0.008333333333333333,
+    "frame_interval_s": 0.03333333333333333
+  },
+  "scene": {
+    "uv": [[320.0, 240.0], [220.0, 180.0], [420.0, 180.0], [220.0, 300.0], [420.0, 300.0]],
+    "depth_m": [2.0, 2.0, 2.0, 2.0, 2.0],
+    "weights": [1.0, 1.0, 1.0, 1.0, 1.0]
+  },
+  "note": "Illustrative intrinsics, focal depths, and exposure only. Replace with calibrated D435i and scene geometry."
+}

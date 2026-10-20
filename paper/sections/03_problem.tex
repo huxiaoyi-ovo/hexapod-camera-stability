@@ -1,0 +1,34 @@
+\section{System Model and Problem Formulation}\label{sec:problem}
+\subsection{Robot and camera geometry}
+Consider an 18-DOF hexapod with six 3-DOF legs, body pose $T_{WB}\in\SE$, and a rigidly attached camera with known constant extrinsics $T_{BC}$. The camera pose follows
+\begin{equation}\label{eq:cam_pose}
+T_{WC}=T_{WB}T_{BC}.
+\end{equation}
+The locomotion task supplies a commanded planar twist $\bm{v}_{\mathrm{nav}}=[v_x,v_y,\omega_z]^\top$ and a smooth nominal camera twist $\bm\xi_C^{\mathrm{nom}}$ computed from the intended robot trajectory. Normal translational parallax and intentional turning are not treated as failures of stabilization.
+
+The gait generator is parameterized by $\bm\theta=[f,\beta,\kappa]^\top$, denoting cycle frequency, stance duty factor, and a touchdown profile parameter. The requested mean velocity couples frequency and step length, so candidate generation enforces the gait-specific speed--step-length relationship rather than varying frequency and stride independently. Swing clearance is set by terrain and is not reduced merely to obtain a better visual score.
+
+\subsection{From camera disturbance to image motion}
+For a stationary scene point with normalized image coordinates $(x_i,y_i)$, positive camera-frame depth $Z_i$, and camera twist $\bm\xi_C=[v_x,v_y,v_z,\omega_x,\omega_y,\omega_z]^\top$, the local interaction model is
+\begin{equation}\label{eq:interaction}
+\begin{bmatrix}\dot x_i\\\dot y_i\end{bmatrix}=
+\underbrace{\begin{bmatrix}
+-1/Z_i&0&x_i/Z_i&x_iy_i&-(1+x_i^2)&y_i\\
+0&-1/Z_i&y_i/Z_i&1+y_i^2&-x_iy_i&-x_i
+\end{bmatrix}}_{\bm L_i(x_i,y_i,Z_i)}\bm\xi_C.
+\end{equation}
+Pixel rates are obtained by multiplying the two rows by focal lengths $f_x$ and $f_y$. Define the undesired camera twist as
+\begin{equation}\label{eq:disturbance}
+\bm d(t)=\bm\xi_C(t)-\bm\xi_C^{\mathrm{nom}}(t).
+\end{equation}
+This first-order subtraction is defined in a common camera coordinate frame, with nominal and measured twists aligned at the same sampling time. It is valid locally; full nonlinear projection or rendered images are used as independent validation when larger rotations occur.
+
+For an image window $\mathcal W$ with visible static points, define a weighted residual image velocity by
+\begin{equation}\label{eq:pixelcost}
+\Img(t)=\sum_{i\in\mathcal W}w_i\left\|\bm D_f\bm L_i \bm d(t)\right\|_2^2,\quad
+\bm D_f=\mathrm{diag}(f_x,f_y),\qquad \sum_iw_i=1.
+\end{equation}
+We report the net undesired displacement per frame separately from the accumulated projected path length during exposure. The latter is a kinematic blur-risk proxy; it is not a photometric measurement of sharpness or an exact blur point-spread function.
+
+\subsection{Decision problem}
+At gait updates, the controller receives a finite menu $\Theta_{\mathrm{safe}}$ screened by the host leg/contact controller, and online observation $\bm o_t$. Let $\pi_c$ denote the same physically executable body stabilizer for all candidate gaits, with measured support- and actuator-dependent response. We seek a gait that minimizes the predicted unwanted image motion \emph{after} this fixed controller has acted, subject to gait feasibility, achieved-speed and safe-transition constraints. The operational decision rule is given in Eq.~\eqref{eq:outer_goal_new}. No arbitrary ideal compensating input is assumed to be perfectly executed.

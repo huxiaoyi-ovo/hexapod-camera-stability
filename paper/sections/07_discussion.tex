@@ -1,0 +1,11 @@
+\section{Discussion and Limitations}
+\subsection{When compensation-aware ranking is useful}
+The mechanism is expected to be most relevant when compensation workspace or response bandwidth differs across gait candidates. In an unconstrained regime with a near-perfect stabilizer, the extra gait selection criterion may produce little benefit. That regime is a legitimate limiting case and should be included in analysis rather than hidden.
+
+The model can also fail when predicted disturbances are dominated by uncertain contact events or when the optimal gait lies outside the small candidate set. A physically reliable response must explicitly address low-bandwidth position servos, contact uncertainty and the limited directions of body correction. Merely allowing a six-dimensional virtual camera correction would overstate what the legged platform can accomplish.
+
+\subsection{Measurement limitations and real-world interpretation}
+Camera twist prediction can be related to image displacement only through a stated camera model and visible depth distribution. Inter-frame jitter, exposure-time path length, motion blur, rolling-shutter shear and perception accuracy are not interchangeable metrics. A feature-depth weighting that improves short-range targets may not minimize background image motion; this tradeoff should be discussed for the eventual task. The real-camera comparison is necessary for any explicit claim about recorded video stabilization.
+
+\subsection{Scope of claimed contribution}
+The work cannot claim to be the first hexapod controller with gaze feedback, the first gait smoother, the first CPG--MPC hierarchy, or the first visual objective in robot control. Any eventual novelty claim must be supported by measured improvement over residual-image-cost scheduling with a candidate-independent compensation budget, not solely by superiority to a naive fixed tripod gait.

@@ -1,0 +1,26 @@
+\section{Results}\label{sec:results}
+\noindent\todoexp{No hexapod dynamics runs or real-camera experiments have yet been generated for this manuscript. Do not use illustrative numerical tests as paper results.}
+\subsection{Comparison across terrain and locomotion conditions}
+Report per-terrain and aggregate undesired image displacement, exposure-motion proxy, achieved speed and traversal success for B0--B6 and Ours. Use paired terrain seeds. Figure~\ref{fig:resultmap} is a \emph{figure slot}, not an observed result.
+\begin{figure}[ht]\centering
+\fbox{\parbox[c][36mm][c]{0.88\linewidth}{\centering \textbf{Figure 2 -- DATA REQUIRED}\\ Per-terrain jitter and achieved speed, baseline versus proposed, paired seeds.}}
+\caption{Required per-terrain performance comparison; plot only after real rollout metrics are available.}\label{fig:resultmap}
+\end{figure}
+\subsection{Compensation-dependent gait ranking}
+Show at least one case in which the best raw-disturbance gait differs from the best residual-image-disturbance gait. Report the predicted and measured ranking, the support geometry and available joint correction margins. This panel is central to distinguishing the method from loss-function replacement.
+\begin{figure}[ht]\centering
+\fbox{\parbox[c][32mm][c]{0.88\linewidth}{\centering \textbf{Figure 3 -- DATA REQUIRED}\\ Same candidate set: raw camera motion, attainable body correction, residual pixel motion.}}
+\caption{Required mechanism-level evidence; compare prediction to independently recorded motion.}\label{fig:ranking}
+\end{figure}
+\subsection{Ablation, prediction, computation and real video}
+Provide a train/test-separated predictor accuracy table; component ablations (A1--A4); controller timing distribution including worst-case latency; and synchronized image/IMU comparisons from the physical camera. Failure cases and loss of perception tracking should be visible rather than excluded.
+\begin{table}[ht]\centering\small
+\caption{Results reporting template. Numeric cells remain deliberately empty pending real measurements.}
+\begin{tabular}{@{}lllll@{}}\toprule Method & Jitter (px/frame) & Speed (m/s) & Success (\%) & Runtime (ms)\\\midrule
+B1 & TBD & TBD & TBD & TBD\\
+B2 & TBD & TBD & TBD & TBD\\
+B3 & TBD & TBD & TBD & TBD\\
+B4 & TBD & TBD & TBD & TBD\\
+B5 & TBD & TBD & TBD & TBD\\
+Ours & TBD & TBD & TBD & TBD\\\bottomrule
+\end{tabular}\label{tab:resultplaceholder}\end{table}
