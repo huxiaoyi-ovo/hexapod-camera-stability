@@ -18,8 +18,10 @@ With `PCR_ROOT` pointing to your local **Pcrnet_hexapod** checkout and `RESEARCH
 export PCR_ROOT=/home/hxy/RL_GYM_PROJECTS/RL_hexapod_gym
 export RESEARCH_ROOT=/path/to/hexapod-camera-stability
 cd "$RESEARCH_ROOT"
+# In a separate offline-test environment if needed (do not upgrade NumPy/Torch inside Isaac Gym blindly):
 python -m pip install -r requirements-core.txt
 python -m pytest -q tests/
+# The PhysX pilot below must run in the *existing compatible Isaac Gym environment*.
 
 # First inspect the official URDF and existing command interface. Then single run:
 python integration/pcrnet/collect_camera_stable_gaits.py \
