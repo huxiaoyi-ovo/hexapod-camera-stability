@@ -23,7 +23,9 @@ The two working technical contributions are (1) gait-conditioned prediction of d
 
 **Available:** numeric proof-of-interface code for a parameterized tripod gait, pinhole image-motion residual calculation, candidate scoring, simulated state logging, trial-window construction, motor-action conversion, and lightweight response surrogate; LaTeX manuscript work draft; unit tests.
 
-**New, unexecuted P0 simulator pilot:** URDF-matched toe IK, continuous-phase gait, bounded body-pose correction and single-/paired-run launcher are now implemented. They must still be exercised in the original PCR-Net Isaac Gym environment. See [P0 PhysX pilot instructions](docs/23_PCR_PHYSX_PILOT.md), [collector](integration/pcrnet/collect_camera_stable_gaits.py) and [paired launcher](scripts/run_pcr_paired_pilot.py). Latest GitHub Actions offline test suite passed (41 tests); it is not a physics validation.\n\n**Not yet available:** working PCR-Net gait/IK/stance compensation closed-loop rollout in Isaac Gym; validated contact/motor response calibration; learned surrogate trained on actual Isaac Gym rollouts; any study performance numbers or real-robot experiments.
+**New, unexecuted P0 simulator pilot:** URDF-matched toe IK, continuous-phase gait, bounded body-pose correction and single-/paired-run launcher are now implemented. They must still be exercised in the original PCR-Net Isaac Gym environment. See [P0 PhysX pilot instructions](docs/23_PCR_PHYSX_PILOT.md), [collector](integration/pcrnet/collect_camera_stable_gaits.py) and [paired launcher](scripts/run_pcr_paired_pilot.py). Latest GitHub Actions offline test suite passed (41 tests); it is not a physics validation.
+
+**Not yet available:** working PCR-Net gait/IK/stance compensation closed-loop rollout in Isaac Gym; validated contact/motor response calibration; learned surrogate trained on actual Isaac Gym rollouts; any study performance numbers or real-robot experiments.
 
 The repository does **not** contain fabricated Results. A successful unit test is not evidence of gait stability or camera improvement.
 
