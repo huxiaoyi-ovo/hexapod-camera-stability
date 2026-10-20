@@ -50,6 +50,30 @@ def read_hexground_state(env, env_id: int = 0) -> dict:
     return dict(root=root, q=q, dq=dq, torque=torque, foot_forces=contacts[indices])
 
 
+def canonical_toe_permutation(env, env_id: int = 0):
+    """Map Isaac Gym's actual feet_indices order to lb,lf,lm,rb,rf,rm.
+
+    Actor rigid-body ordering is NOT guaranteed to match gait-generator order.
+    Resolve via the same Gym handle API as PCR's LeggedRobot._create_envs.
+    """
+    if not all(hasattr(env, x) for x in ('gym', 'envs', 'actor_handles', 'feet_indices')):
+        raise AttributeError('Cannot verify PCR toe rigid-body identity')
+    from pcr_urdf_ik import LEG_ORDER
+    handle_to_slot = {int(x): i for i, x in enumerate(_array(env.feet_indices).astype(int))}
+    if len(handle_to_slot) != 6:
+        raise ValueError('Foot handles are not six distinct rigid bodies')
+    perm = []
+    for leg in LEG_ORDER:
+        handle = int(env.gym.find_actor_rigid_body_handle(
+            env.envs[env_id], env.actor_handles[env_id], f'l_{leg}_toe'))
+        if handle not in handle_to_slot:
+            raise ValueError(f'PCR toe handle missing or inconsistent: {leg}')
+        perm.append(handle_to_slot[handle])
+    if len(set(perm)) != 6:
+        raise ValueError('Foot permutation contains duplicates')
+    return np.array(perm, dtype=int)
+
+
 @dataclass(frozen=True)
 class TrialIdentity:
     trial_id: str
@@ -78,7 +102,8 @@ COLUMNS = (
 class PcrSimTap:
     """One tap per rollout. `controller_on` describes controller executed by host."""
     def __init__(self, output_csv: str | Path, identity: TrialIdentity,
-                 measured_contact_threshold_n: float = 1.0):
+                 measured_contact_threshold_n: float = 1.0,
+                 canonical_feet_permutation=None):
         identity.validate()
         self.identity = identity
         self.path = Path(output_csv)
@@ -88,6 +113,13 @@ class PcrSimTap:
         if measured_contact_threshold_n < 0:
             raise ValueError('Bad contact threshold')
         self.threshold = float(measured_contact_threshold_n)
+        if canonical_feet_permutation is None:
+            self.feet_perm = np.arange(6, dtype=int)  # legacy caller, unchecked
+        else:
+            perm = np.asarray(canonical_feet_permutation, dtype=int)
+            if perm.shape != (6,) or set(perm.tolist()) != set(range(6)):
+                raise ValueError('Invalid canonical foot-contact permutation')
+            self.feet_perm = perm
         self.handle = self.path.open('w', newline='', encoding='utf-8')
         self.writer = csv.DictWriter(self.handle, fieldnames=COLUMNS)
         self.writer.writeheader()
@@ -108,7 +140,8 @@ class PcrSimTap:
         support = np.asarray(planned_support)
         if support.shape != (6,):
             raise ValueError('Planned support mask must have shape (6,)')
-        measured_contact = np.linalg.norm(v['foot_forces'], axis=1) > self.threshold
+        foot_forces = v['foot_forces'][self.feet_perm]
+        measured_contact = np.linalg.norm(foot_forces, axis=1) > self.threshold
         i = self.identity
         row = dict(trial_id=i.trial_id, pair_id=i.pair_id,
                    terrain_instance_id=i.terrain_instance_id, seed=i.seed,
@@ -118,7 +151,7 @@ class PcrSimTap:
                    q_rad_json=json.dumps(v['q'].tolist()),
                    dq_rad_s_json=json.dumps(v['dq'].tolist()),
                    torque_nm_json=json.dumps(v['torque'].tolist()),
-                   foot_forces_n_json=json.dumps(v['foot_forces'].tolist()),
+                   foot_forces_n_json=json.dumps(foot_forces.tolist()),
                    planned_support_json=json.dumps(support.astype(bool).tolist()),
                    measured_foot_contact_json=json.dumps(measured_contact.tolist()))
         row.update(dict(zip([x for x in COLUMNS if x.startswith('root_')],v['root'].tolist())))
