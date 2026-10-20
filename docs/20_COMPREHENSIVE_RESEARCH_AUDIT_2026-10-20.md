@@ -1,6 +1,6 @@
 # Machines 稿件与代码审计：2026-10-20
 
-> 审计范围：本仓库源码、31→33 项离线测试、Methods/Experiments/Results、PCR-Net 原仓库公开接口。未运行 Isaac Gym，不作任何动力学性能结论。此文件用于团队内部执行，不是投稿正文。
+> 审计范围：本仓库源码、33 项离线测试、Methods/Experiments/Results、PCR-Net 原仓库公开接口。未运行 Isaac Gym，不作任何动力学性能结论。此文件用于团队内部执行，不是投稿正文。
 
 ## 结论
 
@@ -51,3 +51,7 @@
 3. 预测器输入仅限决策时可得量；future contacts、ground-truth terrain seeds 只能用于离线诊断。
 4. 扰动指标不把有意平移导致的正常光流全部算作抖动。
 5. 论证须控制实际速度，不能通过减速“赢”得相机稳定。
+
+## 远端工程卫生
+
+仓库初始化时的空目录占位 README（`src/README.md` 等）和原 `docs/STATUS.md` 包含“尚未同步论文/算法”的旧状态，完整工程推送后必须清理，避免与本审计及根目录 README 矛盾。
