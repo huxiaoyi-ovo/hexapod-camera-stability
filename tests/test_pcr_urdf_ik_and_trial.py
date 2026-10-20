@@ -27,7 +27,7 @@ def example_urdf(tmp_path, bad_axis=False):
             j = ET.SubElement(robot, 'joint', name=f'j_{leg}_{joint}',
                               type='fixed' if joint=='toe' else 'revolute')
             ET.SubElement(j,'origin', xyz=origins[i][0],rpy=origins[i][1])
-            ET.SubElement(j,'parent',link='body' if i==0 else f'l_{leg}_{(JOINTS+('toe',))[i-1]}')
+            ET.SubElement(j,'parent',link='body' if i==0 else f"l_{leg}_{(JOINTS+('toe',))[i-1]}")
             ET.SubElement(j,'child',link=f'l_{leg}_{joint}')
             if joint!='toe':
                 ET.SubElement(j,'axis',xyz='1 0 0' if bad_axis else '0 0 1')
