@@ -1,0 +1,41 @@
+# Local environments and secrets
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+*.pem
+*.key
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Simulation logs, datasets, sensitive videos, models
+runs/
+outputs/
+data/raw/
+data/intermediate/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.bag
+*.db3
+*.mp4
+*.avi
+*.mkv
+
+# LaTeX build byproducts
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.fdb_latexmk
+*.fls
+
+# Keep unpublished draft PDF out of this public repo
+paper/*.pdf
+.DS_Store
