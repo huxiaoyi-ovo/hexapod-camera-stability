@@ -1,6 +1,8 @@
+> **Historical execution note — superseded for current runs.** This document preserves the original PCR-Net integration instructions and results for provenance. The canonical local simulator is now the standalone flat-stand diagnostic in [docs/24_STANDALONE_SIMULATOR.md](24_STANDALONE_SIMULATOR.md). The PCR collector and `src/pcr_*` code remain historical/integration work; they are not the standalone runtime. Scientific evidence and failure-status cautions below remain relevant to their original context.
+
 # P0: PCR-Net PhysX Single-Robot Gait Pilot
 
-Date: 2026-10-20 · Code ready for local PCR-Net integration, **not executed in Isaac Gym**.
+Date: 2026-10-21 · Code integrated with the existing PCR checkout; CPU PhysX startup and data capture were executed, but the standing gate failed before walking was validated.
 
 ## What was implemented
 
@@ -55,3 +57,28 @@ For users preferring the requested script path in PCR-Net itself, copy
 The pilot is intentionally **NumPy/single-env**, incurs CPU↔GPU synchronization for each log step, does not yet anchor stance toes in world coordinates, uses a bounded proportional pose correction with no identified response bandwidth, and uses the original URDF geometry but still requires coordinate/foot-ID verification in Isaac Gym. This is a test harness, not a publishable complete gait controller.
 
 The next engineering step after obtaining first real physics logs is: world-anchored stance + transition-safe contact control, followed by batched PyTorch GPU actions and buffered logging. A contact-specific speed/force guard and real actuator-response randomization must precede multi-terrain experiments.
+
+## Local verification (2026-10-21)
+
+The existing `/home/artrc/miniconda3/envs/grasp_hexapod` environment runs Python 3.8.20, Torch 1.8.1+cpu and NumPy 1.23.5. Reuse it without installing or upgrading packages. For gymtorch, add its existing `bin` directory to `PATH` and use a temporary extension cache; no `LD_LIBRARY_PATH` change was needed:
+
+```bash
+cd /home/artrc/hexapod-camera-stability
+ENV=/home/artrc/miniconda3/envs/grasp_hexapod
+export PATH="$ENV/bin:$PATH"
+export TORCH_EXTENSIONS_DIR=/tmp/physx_pilot_torch_extensions
+
+"$ENV/bin/python" -m pytest -q tests/  # 41 passed
+
+# Use a new timestamped output directory for every run.
+RUN_DIR=/home/artrc/hexapod-camera-stability/data/raw/physx_cpu_off_YYYYMMDDTHHMMSS
+"$ENV/bin/python" integration/pcrnet/collect_camera_stable_gaits.py \
+  --pcr-root /home/artrc/Pcrnet_hexapod \
+  --research-root /home/artrc/hexapod-camera-stability \
+  --output-root "$RUN_DIR" --controller off --pair-id pilot01 --seed 42 \
+  --steps 400 --frequency-hz 1.1 --duty-factor 0.58 --swing-height 0.025 \
+  --touchdown-softness 0.5 --forward-mps 0.08 --ramp-s 1.0 \
+  --sim-device cpu --headless
+```
+
+The verified run at `data/raw/physx_cpu_off_20261021T1240b/` used CPU PhysX (GPU pipeline disabled) and preserved 301 stand samples over 6.02 s, but failed the settle gate before walking; it is not a validated gait trial. The GPU PhysX initialization path previously terminated with a segmentation fault. No OFF/ON pair has been run. Camera optical extrinsics remain uncalibrated, so optical response windows are not validated.

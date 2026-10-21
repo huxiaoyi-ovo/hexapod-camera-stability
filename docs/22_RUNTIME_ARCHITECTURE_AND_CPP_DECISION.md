@@ -1,7 +1,9 @@
 # Runtime Architecture Decision — Machines Camera-Stable Hexapod
 
+> **Superseded initial decision (2026-10-20).** The GPU-tensor `HexGround` runtime and its C++ porting decomposition below describe an earlier proposal, not the active implementation. The project now uses an independent direct Isaac Gym/PhysX stand-only runtime with local robot assets. Preserve timing and control-boundary questions for future profiling; follow [the active architecture contract](25_ARCHITECTURE_AND_EXPERIMENT_CONTRACT.md) and [verification record](27_REFACTOR_VERIFICATION.md). No 50-Hz path, walking baseline, or C++ port has been validated.
+
 Date: 2026-10-20
-Status: ACCEPTED FOR INITIAL IMPLEMENTATION
+Status: Historical proposal; superseded by docs/25_ARCHITECTURE_AND_EXPERIMENT_CONTRACT.md
 Related platform: https://github.com/huxiaoyi-ovo/Pcrnet_hexapod
 
 ## Decision

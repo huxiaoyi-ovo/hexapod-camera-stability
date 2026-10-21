@@ -102,13 +102,14 @@ def image_motion_metrics(t: np.ndarray, residual_camera_twist: np.ndarray,
     for start in starts:
         end = start + camera.frame_interval_s
         tf, vf = _interval_samples(t, flow, start, end)
-        frame_disp = np.trapezoid(vf, tf, axis=0).reshape(n_features, 2)
+        integrate = np.trapezoid if hasattr(np, 'trapezoid') else np.trapz
+        frame_disp = integrate(vf, tf, axis=0).reshape(n_features, 2)
         jitter2.append(float(np.sum(w * np.sum(frame_disp**2, axis=1))))
         exp_end = start + camera.exposure_s
         te, ve = _interval_samples(t, flow, start, exp_end)
         feature_velocity = np.linalg.norm(ve.reshape(len(te), n_features, 2), axis=2)
-        path_length = np.trapezoid(feature_velocity, te, axis=0)
-        exp_disp = np.trapezoid(ve, te, axis=0).reshape(n_features, 2)
+        path_length = integrate(feature_velocity, te, axis=0)
+        exp_disp = integrate(ve, te, axis=0).reshape(n_features, 2)
         trace2.append(float(np.sum(w * path_length**2)))
         net2.append(float(np.sum(w * np.sum(exp_disp**2, axis=1))))
         peaks.append(float(np.max(path_length)))

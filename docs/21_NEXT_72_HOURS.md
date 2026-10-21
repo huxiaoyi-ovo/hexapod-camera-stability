@@ -1,4 +1,6 @@
-# 下一个 72 小时：产出真实 Results 的最短路径
+# 历史计划：产出真实 Results 的 72 小时执行草案
+
+> **Superseded historical plan (2026-10-20).** The day-by-day PCR-Net/HexGround implementation route below was not executed and is no longer the active architecture. Retain it as planning history only; follow [docs/25_ARCHITECTURE_AND_EXPERIMENT_CONTRACT.md](25_ARCHITECTURE_AND_EXPERIMENT_CONTRACT.md) for the current independent-runtime sequence and status.
 
 **P0 / Day 1：PCR-Net 仿真最小闭环**
 

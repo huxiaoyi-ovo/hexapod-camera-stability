@@ -1,4 +1,6 @@
-# PCR-Net Isaac Gym integration contract (current)
+# PCR-Net Isaac Gym integration contract (historical; inactive)
+
+> **Historical PCR adapter contract, inactive.** The API and module descriptions below are retained as records of prior integration work and source inspection, not as active architecture or validated runtime behavior. The standalone simulator uses only the locally copied robot description and required meshes; it does not run `HexGround` or import PCR code. See [docs/25_ARCHITECTURE_AND_EXPERIMENT_CONTRACT.md](../docs/25_ARCHITECTURE_AND_EXPERIMENT_CONTRACT.md).
 
 **Base repository:** https://github.com/huxiaoyi-ovo/Pcrnet_hexapod
 
@@ -28,4 +30,4 @@ Do **not** use the unrelated `Grasp_hexapod` climbing controller as the locomoti
 4. Calibrate/verify the effective actuator response and camera optical-frame transform.
 5. Save reproducible seed, terrain instance, controller gain and code revision with each rollout.
 
-This file supersedes the former Grasp integration notes; the host integration protocol is in `docs/18_LOCAL_ISAAC_GYM_INTEGRATION_TASK.md`.
+This file superseded the former Grasp integration notes at the time it was written. Its PCR-based implementation proposal is historical; the current independent architecture is defined in [document 25](../docs/25_ARCHITECTURE_AND_EXPERIMENT_CONTRACT.md).

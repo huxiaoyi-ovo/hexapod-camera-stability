@@ -1,6 +1,6 @@
 # Machines 论文 V2 技术定稿：闭环补偿响应条件化的步态选择
 
-日期：2026-10-20。平台：`huxiaoyi-ovo/Pcrnet_hexapod`；本稿不再以 `Grasp_hexapod` 作为实验平台。
+日期：2026-10-20。历史平台审查：`huxiaoyi-ovo/Pcrnet_hexapod`；本文件保留科学问题、对照和数据划分原则。其代码落点与继承 HexGround 的方案已被[当前架构与实验契约](25_ARCHITECTURE_AND_EXPERIMENT_CONTRACT.md)取代：PCR-Net 仅提供本地 URDF/必要网格的来源，不能作为运行时或控制实现依赖。
 
 ## 1. 唯一研究问题与可信贡献边界
 
@@ -35,7 +35,7 @@
 
 ## 3. 数据闭环：如何真正让模型学到“改步态的后果”
 
-1. 基于 PCR-Net `legged_gym/envs/hex_v4/hex_ground.py` 建立独立的论文任务配置、平地/斜坡/台阶/随机起伏地形。不要直接用 PCR 的目标跟随成功率作为新论文结果。
+1. 下一阶段在本项目内使用 Isaac Gym/PhysX 直接建立独立任务，依据本地机器人模型实现并验证步态、运动学和接触控制；地形与实验参数须由项目配置显式给出。不要把 PCR 运行时或其目标跟随成功率当作新论文实现或结果。
 2. 固定导航速度（并记录实际速度），规划参数化三角步态候选，至少跨越三个步频水平、三个占空比水平及两种触地曲线；样本分布需要覆盖与在线选择器同一候选菜单。
 3. 在**相同地形实例、相同目标速度、相同候选参数、相同初始分布**下分别启用/关闭 *同一* Roll/Pitch/Z 补偿器。机器人运动轨迹可能发散；配对是条件配对，不应伪装逐帧完全相同的因果反事实。
 4. 每 0.5–1 秒窗口记录：`terrain_instance_id, pair_id, seed, controller_on, θ, phase, measured IMU, commanded/actual speed, planned contact, predicted IK headroom, RGB/静态特征残余抖动`。特征必须在候选执行**之前**可得到，`future measured contact/terrain exact state` 仅能作为离线验证标签，不能进入在线特征。
@@ -52,9 +52,9 @@
 - 另做“补偿器频响/延迟辨识”——独立测试几种安全幅值的低频 Roll/Pitch/Z 姿态参考，实测闭环相机角速度衰减，区分关节余量够但响应太慢的情况；由此决定用于论文的能力表征维度。
 - 图像指标必须剔除平滑导航运动的预期光流；模拟相机位姿导出的 px/frame 为动力学代理指标；独立真实视频静态特征残余光流 / 重投影误差用于验证。曝光设置固定或记录，不把 IMU 模糊代理直接称为真实图像清晰度。
 
-## 5. PCR-Net 仓库复用与新增文件
+## 5. 历史上游源码审查（不是当前实现方案）
 
-已在 GitHub 确认真实仓库 `huxiaoyi-ovo/Pcrnet_hexapod`：
+以下表格和文件清单记录 2026-10-20 的上游源码审查，作为模型来源与研究背景记录，不是本仓库的当前代码结构：
 
 | 已有实现 | 在论文中的用途 | 是否修改旧 PCR-Net 行为 |
 | --- | --- | --- |
@@ -64,7 +64,7 @@
 | `src_real/interface/scripts/physical_robot/run_agent2.py` | 关节/电机真实执行与状态 | 首先旁路独立新控制器验证，不覆盖已稳定的 PCR 实机节点 |
 | `src_real/interface/scripts/pcr_real/...` | D435i 摄像头、时间戳/ROS 管线 | 读取共用数据，不需要重新训练 PCR 高层 |
 
-计划新文件：`legged_gym/envs/hex_v4/hex_camera_stability.py`（新任务）、`..._config.py`（实验地形）、`legged_gym/scripts/collect_gait_response.py`（配对采集）、`legged_gym/scripts/eval_camera_gait.py`（公平对照）、`src_real/.../camera_stable_gait_node.py`（实机独立节点）。本轮不在未运行 Isaac Gym 的环境中声称这些适配层已经联调通过。
+上述计划在架构决策更新前提出，现已作废。当前项目只导入 URDF 和必要网格；模拟任务、运动学、控制器、采集器及分析工具均由本项目独立实现。现有 standalone runner 只做平地站立，步态和补偿组件仍待实现与验证。
 
 ## 6. 十一月二十日倒排：只处理会改变投稿结果的工作
 

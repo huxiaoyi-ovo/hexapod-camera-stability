@@ -1,4 +1,6 @@
-# PCR-Net 六足实验适配接口（仅使用 Pcrnet_hexapod）
+# PCR-Net 六足实验适配接口（历史草案；当前不活动）
+
+> **历史接口方案，当前不活动。** 以下内容记录既往 PCR/HexGround 适配审查，保留其研究与公平对照注意事项，不再是实现指令。本项目运行时仅使用本地 robot asset，不依赖 PCR-Net、`HexGround` 或 `legged_gym`。当前边界见[架构与实验契约](../docs/25_ARCHITECTURE_AND_EXPERIMENT_CONTRACT.md)。
 
 仓库：<https://github.com/huxiaoyi-ovo/Pcrnet_hexapod>，`main`。已核查文件：
 `legged_gym/envs/hex_v4/hex_ground.py`, `hex_ground_config.py`, `src_real/interface/scripts/physical_robot/run_agent2.py`, `src_real/locomotion/curv_adapt/scripts/curv_adapt_multi.py`。

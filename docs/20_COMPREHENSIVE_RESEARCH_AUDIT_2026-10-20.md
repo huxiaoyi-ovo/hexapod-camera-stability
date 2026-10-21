@@ -1,5 +1,7 @@
 # Machines 稿件与代码审计：2026-10-20
 
+> **Historical audit snapshot (2026-10-20).** This audit predates the standalone simulator architecture. Preserve its review of prototype limitations and scientific risks; PCR/HexGround runtime recommendations and status statements are historical, not current instructions. See [the active architecture and experiment contract](25_ARCHITECTURE_AND_EXPERIMENT_CONTRACT.md) and [verification record](27_REFACTOR_VERIFICATION.md).
+
 > 审计范围：本仓库源码、33 项离线测试、Methods/Experiments/Results、PCR-Net 原仓库公开接口。未运行 Isaac Gym，不作任何动力学性能结论。此文件用于团队内部执行，不是投稿正文。
 
 ## 结论

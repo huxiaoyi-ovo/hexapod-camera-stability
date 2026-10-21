@@ -1,5 +1,7 @@
 # 给本地 Codex / 开发 Agent 的精确开发任务（PCR-Net，V3）
 
+> **Historical implementation plan (2026-10-20), superseded.** Preserve this task specification as project history only. Do not add the proposed task under `legged_gym`, inherit `HexGround`, or use PCR runtime code. The current boundary is [docs/25_ARCHITECTURE_AND_EXPERIMENT_CONTRACT.md](25_ARCHITECTURE_AND_EXPERIMENT_CONTRACT.md); only the local URDF and its required meshes come from PCR-Net.
+
 仓库：`https://github.com/huxiaoyi-ovo/Pcrnet_hexapod`，项目本地 `RL_hexapod_gym`。不要修改已有 PCR-Net 论文评测、`src_real/interface/scripts/physical_robot/run_agent2.py` 和现有网络 checkpoint。新增独立任务，不覆盖原行为。
 
 ## 目标：真正跑通首条仿真开/关补偿配对 rollout

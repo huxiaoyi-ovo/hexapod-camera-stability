@@ -1,6 +1,6 @@
 # Machines 论文 V3：仿真为主、实机为辅的固定研究协议
 
-日期：2026-10-20；代码基础：`huxiaoyi-ovo/Pcrnet_hexapod`（**不是** Grasp_hexapod）。
+日期：2026-10-20；原始代码审查基础：`huxiaoyi-ovo/Pcrnet_hexapod`（不是当前运行时）。本协议中的科学问题、配对条件、速度控制和按 terrain/seed 分组原则继续有效；HexGround/PCR 任务继承、导入与运行指令已由[当前架构与实验契约](25_ARCHITECTURE_AND_EXPERIMENT_CONTRACT.md)取代。PCR-Net 只作为本地机器人模型资产的来源。
 
 ## 研究主张的边界
 
@@ -44,9 +44,9 @@
 
 V3 已给出 PCR 接口的无侵入日志 `src/pcr_sim_bridge.py`、动作映射与限制检查 `src/pcr_action_interface.py`、残余运动标签生成 `src/pcr_sim_windows.py`、组划分 `src/sim_split.py`，这些已通过**合成状态的单元测试**。
 
-**当前仍需在用户 Isaac Gym 环境执行**：新的参数化步态足端规划 → PCR 机器人运动学 IK → 18D action → PhysX 电机力矩；真实 Roll/Pitch/Z 补偿开关及伺服响应；相机外参实际核对；完整地形批处理。当前没有任何合格的物理仿真性能结果。下面不能被称为“已集成 Isaac Gym 运行”。
+**历史计划中的工程缺口（不是当前接口指令）**：当时的方案假设使用 PCR 机器人运动学和 18D action 接入 PhysX。当前执行路线改为在本项目内构建独立步态/运动学/接触控制，并完成补偿器、伺服响应与相机外参验证；依赖和阶段边界见[架构与实验契约](25_ARCHITECTURE_AND_EXPERIMENT_CONTRACT.md)。现有独立 runner 仅验证平地站立，没有合格的行走或相机性能结果。
 
-### 在 PCR-Net Isaac Gym 的嵌入点（伪代码，不能直接运行）
+### 历史 HexGround 集成草案（仅作历史记录，不能作为当前运行指令）
 
 ```python
 # env: actual HexGround task from PCR-Net; not a synthetic mock
@@ -69,7 +69,7 @@ with PcrSimTap(log_path, identity) as tap:
                    planned_support=planned_support[0])
 ```
 
-注意：环境 `HexGround.step` 使用**相对默认关节角的 18D action**，其电机模型把 position error 和 velocity error 转成力矩。不能把角度目标直接喂到 action，也不能在自己的代码里假设刚体运动瞬时完美执行。这里仅针对**独立 rollouts** 采样，若仿真自己重置环境，必须停止或剔除该段窗口。
+注意：以上是当时的 HexGround API 方案，不属于当前 runtime。研究设计仍要求独立 rollout、真实执行器响应、完整失败记录和不把不同 episode 窗口拼接；当前 runner 没有 gait rollout，也没有自动 reset。未来每个试验需在开始时显式初始化并记录状态，见文档 25。
 
 ### 从真实采集日志生成监督样本
 

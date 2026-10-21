@@ -2,19 +2,16 @@
 
 | Work item | Status |
 |---|---|
-| Git research workspace | Initialized as a local Git repository |
-| Offline numerical and adapter tests | 41 tests passed locally and in GitHub Actions (offline only) |
-| PCR-Net GitHub source inspected | Confirmed public `huxiaoyi-ovo/Pcrnet_hexapod` |
-| Real Isaac Gym closed-loop run | Runner implemented; physical rollout not yet executed |
-| Parameterized tripod FK/IK | URDF-based solver and simulator action interface coded; runtime not validated |
-| Fixed-bandwidth stance body compensator | Pending |
-| Simulated gait/compensator response dataset | Pending |
-| Learned response predictor from real simulation traces | Pending |
-| Validated paper Results | Pending |
-| Limited real robot RGB evidence | Pending |
+| Standalone Isaac Gym/PhysX diagnostic | Implemented; corrected 6 s GUI stand run passed its diagnostic gate and visual review. This is operational evidence only. |
+| Local robot model assets | URDF and required visual/collision mesh closure are vendored; provenance and asset hashes are recorded. |
+| Full offline suite | Prior worktree result: 48 tests passed. Clean staged-snapshot validation is pending this documentation/manuscript batch. |
+| Standalone targeted checks | Six standalone tests, Python 3.8 compilation, and JSON config loading passed after the visual importer correction. |
+| Project-owned walking gait and FK/IK integration | Pending; existing gait/IK prototypes are not connected to the standalone simulator. |
+| Motor-response and delay identification | Pending; current stand PD values are uncalibrated. |
+| Fixed body-pose compensator and verified camera extrinsics | Pending. |
+| Paired ON/OFF trials and image-motion measurements | Not yet executed; stand diagnostics are not training or comparison data. |
+| Predictor, online scheduler, multi-terrain evaluation | Pending. |
+| Qualified comparative walking/camera Results | Pending. |
+| Real-robot RGB/IMU evidence | Pending. |
 
-Keep all unvalidated claims marked as hypotheses until data are available.
-
-
-See [audit](20_COMPREHENSIVE_RESEARCH_AUDIT_2026-10-20.md) and [next 72 hours](21_NEXT_72_HOURS.md).
-\nNew P0 instructions: [PCR PhysX pilot](23_PCR_PHYSX_PILOT.md). Main trained predictor still awaits actual simulation dataset.\n
+The active platform boundary and required trial logging are in [the architecture and experiment contract](25_ARCHITECTURE_AND_EXPERIMENT_CONTRACT.md). Manuscript status is governed by [the writing guide](26_WRITING_GUIDE.md); validation evidence and scope are summarized in [the verification record](27_REFACTOR_VERIFICATION.md). Keep each unvalidated component and claim explicitly marked as pending.
