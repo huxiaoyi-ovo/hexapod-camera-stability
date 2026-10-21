@@ -13,9 +13,13 @@ from sim_split import split_trials
 
 def mock_env(t=0.0, commanded_speed=.15):
     root=np.array([[0.,commanded_speed*t,.2,0.,0.,0.,1.,0.,commanded_speed,0.,0.,0.,0.]])
+    rigid=np.zeros((1,9,13)); rigid[0,:,2]=.01; rigid[0,:,9]=.02
+    gym=SimpleNamespace(refresh_rigid_body_state_tensor=lambda sim: None)
     return SimpleNamespace(root_states=root, dof_pos=np.zeros((1,18)),
         dof_vel=np.zeros((1,18)),torques=np.zeros((1,18)),
-        contact_forces=np.ones((1,9,3)),feet_indices=np.arange(6))
+        torque_limits=np.full(18,27.),dof_pos_limits=np.tile([-3.,3.],(18,1)),
+        dof_vel_limits=np.full(18,5.),contact_forces=np.ones((1,9,3)),
+        feet_indices=np.arange(6),rb_states=rigid,gym=gym,sim=object())
 
 
 def good_calibration(path,verified=True):
@@ -54,6 +58,10 @@ def test_pcr_state_extracts_actual_root_and_contact():
     assert state['root'].shape==(13,)
     assert state['foot_forces'].shape==(6,3)
     assert state['q'].shape==(18,)
+    assert state['toe_positions'].shape==(6,3)
+    assert np.allclose(state['toe_velocities'],[0.,0.,.02])
+    assert state['min_position_margin']==pytest.approx(3.)
+    assert state['max_dq_ratio']==0.
 
 
 def test_pcr_state_no_silent_missing():
@@ -113,5 +121,8 @@ def test_hexground_action_conversion_no_silent_clip():
     assert actions.shape==(1,18) and np.allclose(actions,.04)
     with pytest.raises(ValueError, match='velocity'):
         targets_to_hexground_actions(env,np.full((1,18),.2))
+    prev=np.full((1,18),.15)
+    assert targets_to_hexground_actions(env,np.full((1,18),.2),
+                                        previous_reference=prev).shape==(1,18)
     with pytest.raises(ValueError, match='joint position'):
         targets_to_hexground_actions(env,np.full((1,18),1.05),check_velocity=False)

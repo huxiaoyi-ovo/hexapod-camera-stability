@@ -11,7 +11,7 @@ from pcr_sim_bridge import _array
 
 
 def targets_to_hexground_actions(env, absolute_q_target, safety_margin_rad=0.01,
-                                 check_velocity=True):
+                                 check_velocity=True, previous_reference=None):
     target=_array(absolute_q_target)
     if target.ndim==1:
         target=target[None,:]
@@ -31,7 +31,8 @@ def targets_to_hexground_actions(env, absolute_q_target, safety_margin_rad=0.01,
     if np.any(target < limits[:,0]+safety_margin_rad) or np.any(target > limits[:,1]-safety_margin_rad):
         raise ValueError('Proposed IK target violates joint position range')
     if check_velocity:
-        now=_array(env.dof_pos)
+        reference = env.dof_pos if previous_reference is None else previous_reference
+        now=_array(reference)
         if now.ndim==1:
             now=now[None,:]
         maxdq=_array(env.dof_vel_limits).reshape(-1)
@@ -41,7 +42,7 @@ def targets_to_hexground_actions(env, absolute_q_target, safety_margin_rad=0.01,
         if not np.isfinite(control_dt) or control_dt<=0:
             raise ValueError('Invalid simulator control dt')
         if np.any(np.abs(target-now)>maxdq[None,:]*control_dt+1e-8):
-            raise ValueError('Target changes faster than nominal joint velocity limits')
+            raise ValueError('Reference changes faster than nominal joint velocity limits')
     scale=np.asarray(env.cfg.control.action_scale,dtype=float)
     if scale.ndim==0:
         scale=np.full((1,18),float(scale))

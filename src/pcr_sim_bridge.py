@@ -25,8 +25,9 @@ def _array(x):
 
 def read_hexground_state(env, env_id: int = 0) -> dict:
     """Read actual Isaac Gym state tensors, with no silent zero fallback."""
-    required = ('root_states', 'dof_pos', 'dof_vel', 'torques',
-                'contact_forces', 'feet_indices')
+    required = ('root_states', 'dof_pos', 'dof_vel', 'torques', 'torque_limits',
+                'dof_pos_limits', 'dof_vel_limits', 'contact_forces',
+                'feet_indices', 'rb_states', 'gym', 'sim')
     absent = [k for k in required if not hasattr(env, k)]
     if absent:
         raise AttributeError(f'HexGround state unavailable: {absent}')
@@ -34,20 +35,36 @@ def read_hexground_state(env, env_id: int = 0) -> dict:
     q = _array(env.dof_pos[env_id]).reshape(-1)
     dq = _array(env.dof_vel[env_id]).reshape(-1)
     torque = _array(env.torques[env_id]).reshape(-1)
+    torque_limits = _array(env.torque_limits).reshape(-1)
+    position_limits = _array(env.dof_pos_limits)
+    velocity_limits = _array(env.dof_vel_limits).reshape(-1)
     indices = _array(env.feet_indices).astype(int)
+    env.gym.refresh_rigid_body_state_tensor(env.sim)
+    rigid = _array(env.rb_states[env_id])
     contacts = _array(env.contact_forces[env_id])
-    if root.shape != (13,) or q.shape != (18,) or dq.shape != (18,) or torque.shape != (18,):
+    if (root.shape != (13,) or q.shape != (18,) or dq.shape != (18,) or torque.shape != (18,)
+            or torque_limits.shape != (18,) or position_limits.shape != (18,2)
+            or velocity_limits.shape != (18,)):
         raise ValueError('Expected root (13), joint states (18), and torque (18)')
     if indices.shape != (6,) or contacts.ndim != 2 or contacts.shape[1] != 3:
         raise ValueError('Expected six foot indices and 3D contact-force array')
-    if np.any(indices < 0) or np.any(indices >= len(contacts)):
-        raise ValueError('Foot rigid-body indices outside contact tensor')
-    values = np.r_[root, q, dq, torque, contacts[indices].ravel()]
+    if rigid.ndim != 2 or rigid.shape[1] != 13 or np.any(indices < 0) or np.any(indices >= len(contacts)) or np.any(indices >= len(rigid)):
+        raise ValueError('Foot rigid-body indices outside state/contact tensor')
+    toes = rigid[indices]
+    values = np.r_[root, q, dq, torque, torque_limits, position_limits.ravel(),
+                   velocity_limits, contacts[indices].ravel(), toes.ravel()]
     if not np.isfinite(values).all():
         raise ValueError('Nonfinite simulator state')
     if abs(np.linalg.norm(root[3:7]) - 1.0) > .02:
         raise ValueError('Root quaternion unexpectedly unnormalized')
-    return dict(root=root, q=q, dq=dq, torque=torque, foot_forces=contacts[indices])
+    margin = np.minimum(q-position_limits[:,0], position_limits[:,1]-q)
+    dq_ratio = np.abs(dq)/velocity_limits
+    saturation = np.abs(torque) >= torque_limits-1e-4
+    return dict(root=root, q=q, dq=dq, torque=torque, foot_forces=contacts[indices],
+                toe_positions=toes[:,:3], toe_velocities=toes[:,7:10],
+                min_position_margin=float(np.min(margin)),
+                max_dq_ratio=float(np.max(dq_ratio)),
+                torque_saturation_fraction=float(np.mean(saturation)))
 
 
 def canonical_toe_permutation(env, env_id: int = 0):
@@ -95,7 +112,9 @@ COLUMNS = (
     'time_s', 'cmd_vx_body_mps', 'cmd_vy_body_mps', 'cmd_wz_body_rad_s',
     *('root_'+i for i in ('px','py','pz','qx','qy','qz','qw','vx','vy','vz','wx','wy','wz')),
     'q_rad_json', 'dq_rad_s_json', 'torque_nm_json', 'foot_forces_n_json',
-    'planned_support_json', 'measured_foot_contact_json',
+    'toe_world_positions_m_json', 'toe_world_velocities_mps_json',
+    'min_position_margin_rad', 'max_dq_limit_ratio', 'torque_saturation_fraction',
+    'phase', 'reference_limited', 'planned_support_json', 'measured_foot_contact_json',
 )
 
 
@@ -127,7 +146,7 @@ class PcrSimTap:
         self.n = 0
 
     def append(self, env, env_id: int, t_s: float, nominal_cmd_body,
-               planned_support=None):
+               planned_support=None, phase='walking', reference_limited=False):
         t = float(t_s)
         cmd = np.asarray(nominal_cmd_body, dtype=float)
         if cmd.shape != (3,) or not np.isfinite(cmd).all() or not np.isfinite(t):
@@ -141,6 +160,8 @@ class PcrSimTap:
         if support.shape != (6,):
             raise ValueError('Planned support mask must have shape (6,)')
         foot_forces = v['foot_forces'][self.feet_perm]
+        toe_positions = v['toe_positions'][self.feet_perm]
+        toe_velocities = v['toe_velocities'][self.feet_perm]
         measured_contact = np.linalg.norm(foot_forces, axis=1) > self.threshold
         i = self.identity
         row = dict(trial_id=i.trial_id, pair_id=i.pair_id,
@@ -151,6 +172,12 @@ class PcrSimTap:
                    q_rad_json=json.dumps(v['q'].tolist()),
                    dq_rad_s_json=json.dumps(v['dq'].tolist()),
                    torque_nm_json=json.dumps(v['torque'].tolist()),
+                   toe_world_positions_m_json=json.dumps(toe_positions.tolist()),
+                   toe_world_velocities_mps_json=json.dumps(toe_velocities.tolist()),
+                   min_position_margin_rad=v['min_position_margin'],
+                   max_dq_limit_ratio=v['max_dq_ratio'],
+                   torque_saturation_fraction=v['torque_saturation_fraction'],
+                   phase=str(phase), reference_limited=int(bool(reference_limited)),
                    foot_forces_n_json=json.dumps(foot_forces.tolist()),
                    planned_support_json=json.dumps(support.astype(bool).tolist()),
                    measured_foot_contact_json=json.dumps(measured_contact.tolist()))

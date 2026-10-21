@@ -3,6 +3,8 @@
 These tests do not run PhysX or certify stable locomotion.
 """
 import math
+import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 import xml.etree.ElementTree as ET
@@ -13,6 +15,9 @@ from scipy.spatial.transform import Rotation
 from pcr_urdf_ik import HexUrdfIK, LEG_ORDER, JOINTS
 from pcr_trial_controller import PcrSingleTrialController, FixedPoseCompensator
 from tripod_gait import TripodConfig, ContinuousPhaseClock, foot_targets, foot_targets_by_phase
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'integration' / 'pcrnet'))
+import collect_camera_stable_gaits
 
 
 def example_urdf(tmp_path, bad_axis=False):
@@ -96,9 +101,16 @@ def test_controller_emits_valid_first_step_with_realistic_geometry(tmp_path):
     assert actions.shape==(1,18)
     np.testing.assert_allclose(actions,0,atol=1e-7)
     assert np.array_equal(stance,np.array([True,True,True,True,True,True]))
-    assert ctrl.clock.cycles==pytest.approx(.022)
+    assert ctrl.phase=='stand'
+    assert ctrl.clock.cycles==0.
+    initial_reference=ctrl.last_desired_q.copy()
+    env.dof_pos += .02
+    ctrl.start_walking()
+    np.testing.assert_allclose(ctrl.last_desired_q,initial_reference)
     actions,_=ctrl.action(.02)
     assert np.isfinite(actions).all()
+    assert ctrl.phase=='walking'
+    assert ctrl.clock.cycles==pytest.approx(.022)
 
 
 def test_bounded_compensation_changes_foot_commands(tmp_path):
@@ -133,3 +145,24 @@ def test_canonical_toe_handle_reordering(tmp_path):
     env=SimpleNamespace(gym=MockGym(),envs=['env0'],actor_handles=['actor0'],feet_indices=np.array(handles))
     permutation=canonical_toe_permutation(env)
     assert permutation.tolist()==[1,3,5,4,0,2]
+
+
+def test_failed_physics_audit_reports_failure_in_stdout_and_sidecar(tmp_path, monkeypatch, capsys):
+    output = tmp_path/'raw'
+    metrics = {'physics_joint_audit_valid':False,'max_dq_to_urdf_limit_ratio':1.2}
+    monkeypatch.setattr(collect_camera_stable_gaits, 'run', lambda args: {
+        'status':'completed_raw_physics_trial','completed_raw_trial':True,
+        'metrics':metrics,'csv':str(output/'audit_off.csv')})
+    monkeypatch.setattr(sys, 'argv', [
+        'collect_camera_stable_gaits.py','--pcr-root',str(tmp_path),
+        '--output-root',str(output),'--controller','off','--pair-id','audit'])
+
+    exit_code = collect_camera_stable_gaits.main()
+
+    stdout = json.loads(capsys.readouterr().out)
+    sidecar = json.loads((output/'audit_off.status.json').read_text())
+    assert exit_code == 2
+    assert stdout['status'] == sidecar['status'] == 'failed_physics_audit'
+    assert stdout['failure_reason'] == sidecar['failure_reason']
+    assert stdout['metrics'] == sidecar['metrics'] == metrics
+    assert sidecar['completed_raw_trial'] is True
