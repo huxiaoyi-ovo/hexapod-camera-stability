@@ -45,6 +45,8 @@ All numeric run parameters are in [configs/flat_stand.json](../configs/flat_stan
 
 The configuration specifies a 2.5 ms physics step, one substep, gravity `[0, 0, -9.81] m/s²`, PhysX TGS, eight position iterations, two velocity iterations, 2 mm contact offset, and zero rest offset. The ground uses unit static and dynamic friction and zero restitution. The base is free; fixed joints are not collapsed, and no mass or inertia overrides are applied. Self-collision is enabled through the actor collision filter setting. GPU physics is enabled while `use_gpu_pipeline` is false.
 
+Configuration types are strict JSON types: solver counts and `min_contacts` must be integers (`min_contacts` is 1–6), physics and asset-import flags must be booleans, and numeric fields reject booleans and non-finite values. Malformed configuration fails before output creation or native Gym import; values are never coerced from strings.
+
 Every physics step applies explicit effort PD to the measured joint state:
 
 `tau = clip(50 * (q_ref - q) - 1.5 * dq, -27, +27) Nm`.
@@ -53,13 +55,13 @@ The torque is capped by both the configured 27 Nm limit and each URDF effort lim
 
 ## Stand gate
 
-A stand window is evaluated only after 2.0 s of simulation and must pass continuously through the final sample for 0.5 s. Each sample must have at least three toe bodies with measured contact force greater than 1 N, absolute roll and pitch no greater than 0.15 rad, 3D root speed no greater than 0.12 m/s, angular speed no greater than 0.25 rad/s, absolute vertical speed no greater than 0.06 m/s, no measured joint limit violation, and no PD command clipping. The gate uses observed body/contact/joint states. Non-finite state or a non-normalized root quaternion stops the run and is recorded with the last measured state. Closing the viewer early records an interrupted status. `status.json` is written before the optional viewer hold and records per-criterion rejection counts over eligible samples, the status, and any failure reason. A run that ends without a passing final window is `failed_stand_gate`.
+A stand window is evaluated only after 2.0 s of simulation and must pass continuously through the final sample for 0.5 s. Duration is measured from the first passing sample and the gate passes at the first sample at least one full window later (within 1 ns tolerance); any failed or invalid sample restarts the interval. Each sample must have at least three toe bodies with measured contact force greater than 1 N, absolute roll and pitch no greater than 0.15 rad, 3D root speed no greater than 0.12 m/s, angular speed no greater than 0.25 rad/s, absolute vertical speed no greater than 0.06 m/s, no measured joint limit violation, and no PD command clipping. The gate uses observed body/contact/joint states. Non-finite state or a non-normalized root quaternion stops the run and is recorded with the last measured state. Closing the viewer early records an interrupted status. `status.json` is written before the optional viewer hold and records per-criterion rejection counts over eligible samples, the status, and any failure reason. A run that ends without a passing final window is `failed_stand_gate`.
 
 ## Output files
 
 - `trace.csv`: one row per recorded physics step; measured root pose and velocity, contact count and contacted leg names, every measured joint position and velocity, target, commanded torque, limit status, and PD command-clipping count.
 - `status.json`: diagnostic status, requested duration, gate result and rejection counts, simulator backend/configuration, reported Gym body/DOF names, package versions, and exact configured pre-step state.
-- `resolved_config.json`: full configuration, resolved local URDF path, asset SHA-256 hashes, simulator device, and FK-derived start height.
+- `resolved_config.json`: full configuration, resolved local URDF path, asset SHA-256 hashes, simulator device, FK-derived start height, Git revision and dirty status, and SHA-256 hashes of the three independent runtime Python files. If Git cannot be queried, the revision and dirty value are null and the recorded status says it was unavailable or timed out; runtime hashes are still collected.
 
 These are diagnostic traces, not training data. Preserve failed logs and status. Offline tests validate parsing, mapping, deterministic configuration, and numeric control calculations; only the simulator trace provides physics evidence, and neither one establishes walking or camera improvement.
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one local-asset flat-ground stand diagnostic."""
+"""Run one local-asset flat-ground stand or walk diagnostic."""
 import argparse
 import json
 import os
@@ -17,18 +17,20 @@ def main():
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--duration-s", type=float)
     parser.add_argument("--output-root")
+    parser.add_argument("--stand-only", action="store_true", help="verify 50 Hz stand initialization without enabling gait")
     parser.add_argument("--hold-viewer", action="store_true", help="keep the finished GUI open until closed (max 20 minutes)")
     args = parser.parse_args()
     env_bin = str(Path(sys.executable).resolve().parent)
     os.environ.setdefault("TORCH_EXTENSIONS_DIR", "/tmp/physx_pilot_torch_extensions")
     if env_bin not in os.environ.get("PATH", "").split(os.pathsep):
         os.environ["PATH"] = env_bin + os.pathsep + os.environ.get("PATH", "")
-    from hexapod_sim import run_stand
-    out = run_stand(args.config, args.sim_device, args.headless, args.duration_s, args.output_root, args.hold_viewer)
+    from hexapod_sim import run_diagnostic
+    out = run_diagnostic(args.config, args.sim_device, args.headless, args.duration_s, args.output_root,
+                         args.hold_viewer, args.stand_only)
     status = out / "status.json"
     if status.exists():
         status_data = json.loads(status.read_text())
-        return 0 if status_data.get("status") == "settled" else 2
+        return 0 if status_data.get("status") in ("settled", "stand_verified", "walk_completed") else 2
     return 2
 
 
