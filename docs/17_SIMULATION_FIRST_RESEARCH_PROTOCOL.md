@@ -38,44 +38,8 @@
 
 用原六足+D435i+IMU，选择平地轻扰动和一类安全非平整地形，初始目标 **3 方法 × 2 场景 × 3 次 = 18 条序列**；三方法是 `F/R/O`。仅在速度、曝光、光照和角度基本可比的条件下比较。记录全部重复和失败情况；这只是初始方案，差异较小应如实报告不确定性。RGB 中需要用静态特征/AprilTag 测量非期望图像运动，不能用仅 IMU 结果替代。记录曝光与 RGB rolling-shutter 相关限制。
 
-**不要求**完整实机多地形泛化、不要求实机为预测器训练大量样本、不要求新硬件云台，也不需要修改已有 PCR 高层 Follow/Avoid 模型。
+**不要求**完整实机多地形泛化、不要求实机为预测器训练大量样本、不要求新硬件云台。
 
-## 尚未完成的工程衔接（必须实事求是）
+## 当前工程边界
 
-V3 已给出 PCR 接口的无侵入日志 `src/pcr_sim_bridge.py`、动作映射与限制检查 `src/pcr_action_interface.py`、残余运动标签生成 `src/pcr_sim_windows.py`、组划分 `src/sim_split.py`，这些已通过**合成状态的单元测试**。
-
-**历史计划中的工程缺口（不是当前接口指令）**：当时的方案假设使用 PCR 机器人运动学和 18D action 接入 PhysX。当前执行路线改为在本项目内构建独立步态/运动学/接触控制，并完成补偿器、伺服响应与相机外参验证；依赖和阶段边界见[架构与实验契约](25_ARCHITECTURE_AND_EXPERIMENT_CONTRACT.md)。现有独立 runner 仅验证平地站立，没有合格的行走或相机性能结果。
-
-### 历史 HexGround 集成草案（仅作历史记录，不能作为当前运行指令）
-
-```python
-# env: actual HexGround task from PCR-Net; not a synthetic mock
-# controller.make_targets MUST provide safe absolute joint references via IK
-# and the real body stabilizer (on or off).
-# q_target is (num_envs,18); planned_support is (num_envs,6).
-from pcr_action_interface import targets_to_hexground_actions
-from pcr_sim_bridge import PcrSimTap, TrialIdentity
-import torch
-
-identity = TrialIdentity(trial_id, pair_id, terrain_id, seed, controller_on, gait_id)
-with PcrSimTap(log_path, identity) as tap:
-    for step_id in range(n_steps):
-        q_target, planned_support = controller.make_targets(env, controller_on)
-        action_np = targets_to_hexground_actions(env, q_target)
-        actions = torch.as_tensor(action_np, device=env.device, dtype=torch.float32)
-        env.step(actions)
-        tap.append(env, env_id=0, t_s=(step_id+1)*env.dt,
-                   nominal_cmd_body=[vx_body,vy_body,wz_body],
-                   planned_support=planned_support[0])
-```
-
-注意：以上是当时的 HexGround API 方案，不属于当前 runtime。研究设计仍要求独立 rollout、真实执行器响应、完整失败记录和不把不同 episode 窗口拼接；当前 runner 没有 gait rollout，也没有自动 reset。未来每个试验需在开始时显式初始化并记录状态，见文档 25。
-
-### 从真实采集日志生成监督样本
-
-1. 先复制 `templates/pcr_sim_calibration.UNVERIFIED.json`，填入实际的相机光学系外参、K、静态参考场景深度与曝光参数；`extrinsic_verified=true` 应在完成坐标标定后才设置。
-2. 收集所有开/关仿真日志，编写 `trial_manifest.json`（见 `templates/pcr_sim_trial_manifest.example.json`），必须在执行各条候选前存储 predecision 特征。
-3. `PYTHONPATH=src python scripts/build_pcr_sim_windows.py --manifest outputs/trial_manifest.json --calibration config/camera.json --output outputs/response_windows.csv`
-4. `PYTHONPATH=src python scripts/evaluate_response_surrogate.py --input outputs/response_windows.csv --test-terrains <若干独立的地形ID>`
-
-主张及新颖性没有因为合成单元测试成功而成立：只有真实动力学多地形和少量实际相机结果才支持 Methods 和 Results。
+本项目现有独立 PhysX 站立与步态原型；目前没有合格的补偿器开/关配对数据。按[架构与实验契约](25_ARCHITECTURE_AND_EXPERIMENT_CONTRACT.md)记录当前实现状态与证据边界。

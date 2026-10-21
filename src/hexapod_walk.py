@@ -208,6 +208,11 @@ def _smoothstep(value: float) -> float:
     return value * value * value * (10.0 + value * (-15.0 + 6.0 * value))
 
 
+def _split_phase(unwrapped_phase: float) -> Tuple[int, float]:
+    cycle = int(math.floor(unwrapped_phase + 1e-12))
+    return cycle, max(0.0, unwrapped_phase - cycle)
+
+
 def _ramp_displacement(elapsed_s: float, speed_m_s: float, ramp_s: float) -> float:
     time_s = max(0.0, float(elapsed_s))
     if ramp_s <= 0 or time_s >= ramp_s:
@@ -236,25 +241,56 @@ class TripodGait:
         self.swing_end: Dict[str, np.ndarray] = {}
         self.swing_started: Dict[str, float] = {}
         self.pending_touchdown_since: Dict[str, float] = {}
+        self.release_seen = {leg: False for leg in LEG_ORDER}
         self.last_phase = 0.0
+        self._phase_time_s = 0.0
+        self._unwrapped_phase = 0.0
         self._started = False
+        self.terrain_adaptation = settings.get("terrain_adaptation")
+        self._last_adaptive_time_s = 0.0
+        self.confirmed_support = {leg: False for leg in LEG_ORDER}
+        self.pending_liftoff_since: Dict[str, float] = {}
+        self.early_landing_hold_cycle: Dict[str, int] = {}
+        self._terrain_body_z_offset_m = 0.0
 
     def body_reference(self, elapsed_s: float) -> np.ndarray:
         distance = _ramp_displacement(elapsed_s, self.speed, self.ramp_s)
         forward = np.array([-math.sin(self.yaw), math.cos(self.yaw), 0.0])
         result = self.initial_body.copy()
         result += forward * distance
+        result[2] += self._terrain_body_z_offset_m
         return result
 
     def phase_for_leg(self, leg: str, elapsed_s: float) -> float:
         offset = 0.0 if leg in TRIPOD_A else 0.5
-        return (float(elapsed_s) * self.frequency + offset) % 1.0
+        time_s = float(elapsed_s)
+        if time_s < self._phase_time_s:
+            raise ValueError("gait phase time must not move backwards")
+        phase = self._unwrapped_phase + (time_s - self._phase_time_s) * self.frequency + offset
+        return _split_phase(phase)[1]
+
+    def _advance_phase(self, elapsed_s: float) -> float:
+        time_s = float(elapsed_s)
+        if not math.isfinite(time_s) or time_s < self._phase_time_s:
+            raise ValueError("gait phase time must be finite and nondecreasing")
+        self._unwrapped_phase += (time_s - self._phase_time_s) * self.frequency
+        self._phase_time_s = time_s
+        return self._unwrapped_phase
+
+    def set_parameters(self, elapsed_s: float, *, frequency_hz: float) -> None:
+        """Advance using the old rate, then apply a continuous frequency change."""
+        self._advance_phase(elapsed_s)
+        value = float(frequency_hz)
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError("gait frequency must be positive and finite")
+        self.frequency = value
 
     def update(self, elapsed_s: float, actual_feet_world: Mapping[str, np.ndarray],
                contacts: Mapping[str, bool]) -> Dict[str, object]:
-        if elapsed_s < 0:
-            raise ValueError("gait elapsed time must be nonnegative")
-        cycle_phase = (float(elapsed_s) * self.frequency) % 1.0
+        if self.terrain_adaptation:
+            return self._update_terrain_adaptive(elapsed_s, actual_feet_world, contacts)
+        unwrapped_phase = self._advance_phase(elapsed_s)
+        cycle, cycle_phase = _split_phase(unwrapped_phase)
         phases = {leg: self.phase_for_leg(leg, elapsed_s) for leg in LEG_ORDER}
         desired = {}
         planned_support = {}
@@ -297,7 +333,111 @@ class TripodGait:
         pending = {leg: elapsed_s - started for leg, started in self.pending_touchdown_since.items()}
         return {"desired_feet_world": desired, "anchors_world": {leg: value.copy() for leg, value in self.anchors.items()},
                 "planned_support": planned_support, "phase_by_leg": phases, "cycle_phase": cycle_phase,
-                "planned_body_xyz_m": self.body_reference(elapsed_s), "pending_touchdown_s": pending}
+                "planned_body_xyz_m": self.body_reference(elapsed_s), "pending_touchdown_s": pending,
+                "completed_cycles": cycle}
+
+    def _update_terrain_adaptive(self, elapsed_s: float, actual_feet_world: Mapping[str, np.ndarray],
+                                 contacts: Mapping[str, bool]) -> Dict[str, object]:
+        settings = self.terrain_adaptation
+        elapsed = float(elapsed_s)
+        unwrapped = self._advance_phase(elapsed)
+        dt = max(0.0, elapsed - self._last_adaptive_time_s)
+        self._last_adaptive_time_s = elapsed
+        desired, planned_support = {}, {}
+        phases = {}
+        for leg in LEG_ORDER:
+            phase_offset = 0.0 if leg in TRIPOD_A else 0.5
+            leg_phase_unwrapped = unwrapped + phase_offset
+            cycle, phase = _split_phase(leg_phase_unwrapped)
+            phases[leg] = phase
+            should_stance = phase < self.duty
+            contact = bool(contacts.get(leg, False))
+            if contact and self.stance[leg]:
+                self.confirmed_support[leg] = True
+
+            if self.stance[leg] and not should_stance:
+                hold_cycle = self.early_landing_hold_cycle.get(leg)
+                if hold_cycle is not None and cycle < hold_cycle:
+                    pass
+                else:
+                    other_group = TRIPOD_B if leg in TRIPOD_A else TRIPOD_A
+                    if all(self.confirmed_support[support_leg] for support_leg in other_group):
+                        self.stance[leg] = False
+                        self.confirmed_support[leg] = False
+                        self.release_seen[leg] = False
+                        self.early_landing_hold_cycle.pop(leg, None)
+                        self.pending_liftoff_since.pop(leg, None)
+                        self.swing_start[leg] = self.anchors[leg].copy()
+                        self.swing_started[leg] = elapsed
+                        swing_duration = (1.0 - self.duty) / self.frequency
+                        touchdown_time = elapsed + max(0.0, swing_duration *
+                            (1.0 - (phase - self.duty) / (1.0 - self.duty)))
+                        self.swing_end[leg] = (self.body_reference(touchdown_time) +
+                                               self._rotate_nominal(self.nominal_feet_base[leg]))
+                    else:
+                        self.pending_liftoff_since.setdefault(leg, elapsed)
+                        if elapsed - self.pending_liftoff_since[leg] > float(settings["liftoff_timeout_s"]):
+                            raise RuntimeError("{} could not lift without confirmed opposite-tripod support".format(leg))
+
+            if not self.stance[leg]:
+                swing_progress = (phase - self.duty) / (1.0 - self.duty) if not should_stance else 1.0
+                if not contact:
+                    self.release_seen[leg] = True
+                contact_height = float(np.asarray(actual_feet_world[leg], dtype=float)[2])
+                touchdown_height_ok = (math.isfinite(contact_height) and
+                                       contact_height <= float(self.swing_end[leg][2]) +
+                                       float(settings["probe_max_depth_m"]))
+                if (contact and self.release_seen[leg] and swing_progress >= 0.5 and
+                        touchdown_height_ok):
+                    self.stance[leg] = True
+                    self.confirmed_support[leg] = True
+                    self.anchors[leg] = np.asarray(actual_feet_world[leg], dtype=float).copy()
+                    if not should_stance:
+                        self.early_landing_hold_cycle[leg] = cycle + 1
+                    else:
+                        self.early_landing_hold_cycle.pop(leg, None)
+                    self.pending_touchdown_since.pop(leg, None)
+                elif should_stance:
+                    self.pending_touchdown_since.setdefault(leg, elapsed)
+                    if elapsed - self.pending_touchdown_since[leg] > float(settings["probe_timeout_s"]):
+                        raise RuntimeError("{} exceeded bounded touchdown probe time".format(leg))
+
+            if self.stance[leg]:
+                planned_support[leg] = bool(self.confirmed_support[leg])
+                desired[leg] = self.anchors[leg].copy()
+            else:
+                swing_progress = (phase - self.duty) / (1.0 - self.duty) if not should_stance else 1.0
+                swing_progress = min(1.0, max(0.0, swing_progress))
+                smooth = _smoothstep(swing_progress)
+                point = self.swing_start[leg] + smooth * (self.swing_end[leg] - self.swing_start[leg])
+                point = point.copy()
+                point[2] += self.clearance * 16.0 * swing_progress*swing_progress*(1.0-swing_progress)*(1.0-swing_progress)
+                if leg in self.pending_touchdown_since:
+                    probe_time = elapsed - self.pending_touchdown_since[leg]
+                    point[2] -= min(float(settings["probe_max_depth_m"]),
+                                    float(settings["probe_speed_m_s"]) * probe_time)
+                planned_support[leg] = False
+                desired[leg] = point
+
+        support_heights = [self.anchors[leg][2] for leg in LEG_ORDER if self.confirmed_support[leg]]
+        if support_heights:
+            target_offset = float(np.median(support_heights)) - float(settings["toe_radius_m"])
+            max_step = float(settings["body_z_rate_m_s"]) * dt
+            self._terrain_body_z_offset_m += float(np.clip(
+                target_offset - self._terrain_body_z_offset_m, -max_step, max_step))
+        completed_cycles, cycle_phase = _split_phase(unwrapped)
+        self.last_phase = cycle_phase
+        pending = {leg: elapsed - started for leg, started in self.pending_touchdown_since.items()}
+        return {"desired_feet_world": desired,
+                "anchors_world": {leg: value.copy() for leg, value in self.anchors.items()},
+                "planned_support": planned_support, "confirmed_support": dict(self.confirmed_support),
+                "phase_by_leg": phases, "cycle_phase": cycle_phase,
+                "planned_body_xyz_m": self.body_reference(elapsed),
+                "pending_touchdown_s": pending,
+                "pending_liftoff_s": {leg: elapsed - started
+                                       for leg, started in self.pending_liftoff_since.items()},
+                "release_seen": dict(self.release_seen),
+                "completed_cycles": completed_cycles}
 
     def _rotate_nominal(self, vector: np.ndarray) -> np.ndarray:
         c, s = math.cos(self.yaw), math.sin(self.yaw)

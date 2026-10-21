@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>openshc_adapter</name>
+  <version>0.1.0</version>
+  <description>Deterministic stdin/stdout adapter for the local robot and pinned OpenSHC core.</description>
+  <maintainer email="local-maintainer@example.invalid">Local Hexapod Project</maintainer>
+  <license>BSD-3-Clause</license>
+  <buildtool_depend>catkin</buildtool_depend>
+  <depend>roscpp</depend>
+  <depend>dynamic_reconfigure</depend>
+  <depend>std_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>syropod_highlevel_controller</depend>
+</package>

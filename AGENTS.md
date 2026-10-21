@@ -1,23 +1,22 @@
-# Repository Guidelines
+# Codex 工作原则：最小、直接、高效
 
-## Runtime boundary
+**核心目标：以最少的代码、步骤和时间，完成当前任务并交付可用结果。拒绝过度工程化。**
 
-The canonical local simulator is the standalone flat-ground stand diagnostic in `scripts/run_hexapod_pilot.py`, using `configs/flat_stand.json` and local assets in `assets/hexapod/`. It must not import or read `Pcrnet_hexapod`, `legged_gym`, PCR model weights, or upstream runtime configuration. The legacy `integration/pcrnet/` and `src/pcr_*` paths are preserved historical/integration work and are not required by the standalone runner. Keep those research modules separate.
+1. **最小实现**：优先采用最简单、可靠、直接的方案。复用已有代码，不引入非必要的抽象层、设计模式、依赖、配置项或兼容逻辑。
+2. **结果优先**：直接推进实现，不反复讨论方案、不无限分析、不为未来可能出现的需求提前设计。优先完成当前真正需要的功能。
+3. **按需验证**：只执行与本次修改直接相关、能够发现实质性问题的最小验证。默认不进行例行烟测、全量回归、安全扫描、重复测试、无意义基准测试或多轮检查。涉及物理仿真时，优先通过一次有代表性的真实运行验证关键行为，而不是堆积模拟测试。
+4. **禁止过度防御**：不为低概率、无实际影响的边界情况增加大量异常处理、回退机制、重复校验或冗余代码。保留已有必要的物理约束和设备保护，但不主动扩大安全测试范围。
+5. **控制任务范围**：只修改实现目标必需的文件。不主动重构无关模块，不顺手清理整个项目，不额外编写长篇文档、测试框架或辅助工具。
+6. **避免重复劳动**：已有可靠结论不重复调查；已有通过的验证不无故重跑；同类错误集中修复，不进行低价值的试错循环。
+7. **科研导向**：优先完成真实算法、仿真运行、数据采集和实验结果。不要用代码覆盖率、测试数量、文档完整度或工程形式主义代替实际研究进展。严格区分已实现功能与真实实验结果。
+8. **自主执行**：自行判断并采用合理默认方案。除非缺少的信息直接阻止实现，否则不频繁询问用户或请求确认。
+9. **及时结束**：当目标已实现且通过必要验证，立即停止。不追加优化、测试、重构或文档工作。
+10. **简洁汇报**：最终只说明完成了什么、关键结果和真正存在的阻碍。不输出冗长过程记录、无关警告或重复总结。
 
-The current standalone runner demonstrates only deterministic standing in Isaac Gym/PhysX. Each run has an explicit recorded trial-start initialization; automatic resets, walking, training, rewards, curriculum, learned actuator models, and validated camera compensation are absent. Treat physics and camera claims as unverified until supported by preserved simulator or hardware evidence.
+**决策准则：任何额外步骤都必须回答一个问题——它是否直接提高当前任务成功的概率或结果质量？如果收益不明确，就跳过。**
 
-## Layout and commands
+## 按需参考
 
-- `src/hexapod_robot.py`: pure NumPy/XML metadata, named joint mapping, FK, and torque calculations.
-- `src/hexapod_sim.py`: one-environment standalone Isaac Gym execution and trace logging.
-- `scripts/`, `configs/`, `assets/`, and ignored `data/raw/`: entry points, parameters, model dependencies, and diagnostic outputs.
-- `docs/24_STANDALONE_SIMULATOR.md`: canonical runtime guide. `docs/23_PCR_PHYSX_PILOT.md` is preserved history, superseded for execution.
-- Read [architecture and experiment contract](docs/25_ARCHITECTURE_AND_EXPERIMENT_CONTRACT.md), [writing guide](docs/26_WRITING_GUIDE.md), and [verification record](docs/27_REFACTOR_VERIFICATION.md) for current boundaries and evidence.
-
-Run offline checks with `PYTHONPATH=src python -m pytest -q tests/`. For local simulation, use `/home/artrc/miniconda3/envs/grasp_hexapod/bin/python`, prepend its `bin` directory to `PATH`, set `TORCH_EXTENSIONS_DIR=/tmp/physx_pilot_torch_extensions`, and follow document 24. Do not install or upgrade Isaac Gym, NumPy, or Torch as part of a run.
-
-## Invariants and validation
-
-Preserve canonical leg order `lb lf lm rb rf rm`, names `j_<leg>_<thigh|knee|ankle>`, and map using Gym-reported names. Retain URDF mass, inertia, limits, and geometry. Use JSON as the numeric runtime authority. Preserve dirty work. Report exact tests and separate offline checks from physics evidence; never infer walking stability, camera improvement, or hardware behavior from unit tests. Do not commit raw diagnostic data, credentials, private media, checkpoints, or bulk datasets.
-
-Use only the `test` and `main` branches. Do active work on `test`; promote to `main` only with explicit user authorization. Do not create additional branches. Use four spaces, `snake_case` functions/modules, and `PascalCase` classes. Read project guidance and `git status --short` before nontrivial batches; validate only affected tiers. Use concise imperative commit subjects with `docs:`, `test:`, or `feat:` prefixes. Pull requests should state scope, rationale, exact validation, and whether evidence is offline or physics-based; do not imply unrun experiments passed.
+- [README](README.md) · [站立模拟器指南](docs/24_STANDALONE_SIMULATOR.md) · [架构与实验契约](docs/25_ARCHITECTURE_AND_EXPERIMENT_CONTRACT.md)
+- [研究方法](docs/16_REVISED_CORE_METHOD_AND_EXECUTION.md) · [仿真研究协议](docs/17_SIMULATION_FIRST_RESEARCH_PROTOCOL.md) · [写作指南](docs/26_WRITING_GUIDE.md) · [验证记录](docs/27_REFACTOR_VERIFICATION.md)
+- [竞品重评](docs/02B_COMPETITOR_REASSESSMENT_2026-10-20.md) · [文献综述](docs/10_MACHINES_20_LITERATURE_REVIEW.md) · [审稿清单](docs/14_MANUSCRIPT_REVIEW_CHECKLIST.md)

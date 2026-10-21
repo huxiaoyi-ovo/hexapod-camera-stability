@@ -14,7 +14,7 @@ import numpy as np
 from hexapod_robot import (JOINT_NAMES, LEG_ORDER, load_robot_model, lowest_stand_height,
                            map_named_values, pd_torque, stand_target_by_name)
 from hexapod_sim import (PROJECT_ROOT, _StandWindowTracker, _runtime_provenance,
-                         load_config)
+                         _limit_joint_position_step, _trajectory_velocity_reference, load_config)
 
 
 class StandaloneHexapodTests(unittest.TestCase):
@@ -90,6 +90,44 @@ class StandaloneHexapodTests(unittest.TestCase):
         self.assertNotIn("legged_gym", serialized)
         self.assertIs(self.config["asset_import"]["flip_visual_attachments"], True)
 
+    def test_openshc_profile_uses_exact_upper_and_physics_cadence(self):
+        config = load_config(PROJECT_ROOT / "configs/flat_walk_openshc.json")
+        self.assertEqual(config["walk_controller"], "openshc")
+        self.assertEqual(config["physics"]["dt_s"], 0.0025)
+        self.assertEqual(config["control_period_s"], 0.02)
+        self.assertEqual(config["walk"]["duty_factor"], 0.5)
+        self.assertEqual(config["walk"]["frequency_hz"], 1.5)
+
+    def test_trajectory_velocity_reference_updates_only_on_ticks_and_clips(self):
+        limit = np.array([2.0, 5.0])
+        held, previous = _trajectory_velocity_reference(
+            np.array([0.0, 0.0]), None, np.zeros(2), True, 0.02, limit)
+        np.testing.assert_array_equal(held, [0.0, 0.0])
+        np.testing.assert_array_equal(previous, [0.0, 0.0])
+
+        held, previous = _trajectory_velocity_reference(
+            np.array([0.1, -0.02]), previous, held, True, 0.02, limit)
+        np.testing.assert_allclose(held, [2.0, -1.0])
+        held_during_physics, previous_during_physics = _trajectory_velocity_reference(
+            np.array([9.0, 9.0]), previous, held, False, 0.02, limit)
+        np.testing.assert_array_equal(held_during_physics, held)
+        np.testing.assert_array_equal(previous_during_physics, previous)
+
+        held, previous = _trajectory_velocity_reference(
+            np.array([0.11, -0.04]), previous_during_physics, held_during_physics,
+            True, 0.02, limit)
+        np.testing.assert_allclose(held, [0.5, -1.0])
+        np.testing.assert_array_equal(previous, [0.11, -0.04])
+
+    def test_command_velocity_operating_cap_limits_qref_without_loosening_hard_cap(self):
+        hard_velocity = np.array([5.0, 5.0])
+        qref, operating_velocity, clamped = _limit_joint_position_step(
+            np.array([1.0, -0.03]), np.zeros(2), hard_velocity, 4.0, 0.02)
+        np.testing.assert_allclose(qref, [0.08, -0.03])
+        np.testing.assert_array_equal(operating_velocity, [4.0, 4.0])
+        np.testing.assert_array_equal(clamped, [True, False])
+        np.testing.assert_array_equal(hard_velocity, [5.0, 5.0])
+
     def test_stand_window_uses_contiguous_elapsed_time_at_sample_resolution(self):
         for dt, window in ((0.003, 0.5), (0.0025, 0.501)):
             tracker = _StandWindowTracker(window)
@@ -148,7 +186,9 @@ class StandaloneHexapodTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for relative in ("src/hexapod_sim.py", "src/hexapod_robot.py", "scripts/run_hexapod_pilot.py",
-                             "src/hexapod_walk.py", "src/hexapod_actuator.py"):
+                             "src/hexapod_walk.py", "src/hexapod_actuator.py", "src/hexapod_openshc.py",
+                             "src/hexapod_sensing.py", "src/hexapod_terrain.py",
+                             "src/hexapod_body_compensation.py"):
                 path = root / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(relative)
@@ -178,7 +218,8 @@ class StandaloneHexapodTests(unittest.TestCase):
                                                   "status": "unavailable_or_timed_out"})
             self.assertEqual(set(provenance["runtime_dependency_sha256"]), {
                 "src/hexapod_sim.py", "src/hexapod_robot.py", "scripts/run_hexapod_pilot.py",
-                "src/hexapod_walk.py", "src/hexapod_actuator.py"})
+                "src/hexapod_walk.py", "src/hexapod_actuator.py", "src/hexapod_openshc.py",
+                "src/hexapod_sensing.py", "src/hexapod_terrain.py", "src/hexapod_body_compensation.py"})
             original = provenance["runtime_dependency_sha256"]["src/hexapod_sim.py"]
             (root / "src/hexapod_sim.py").write_text("changed runtime")
             changed = _runtime_provenance(root)["runtime_dependency_sha256"]["src/hexapod_sim.py"]

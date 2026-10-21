@@ -71,7 +71,7 @@ These are diagnostic traces, not training data. Preserve failed logs and status.
 PYTHONPATH=src python -m pytest -q tests/
 ```
 
-These checks require no Isaac Gym and do not simulate physics. The older [PCR PhysX pilot note](23_PCR_PHYSX_PILOT.md) is retained as a historical record; use this document for current execution.
+These checks require no Isaac Gym and do not simulate physics.
 
 
 ## Recorded local verification (2026-10-21)

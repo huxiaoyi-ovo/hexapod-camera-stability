@@ -183,6 +183,35 @@ class HexapodWalkTests(unittest.TestCase):
             np.testing.assert_array_equal(touchdown["anchors_world"][leg], anchors[leg])
         self.assertGreater(touchdown["planned_body_xyz_m"][1], body[1])
 
+    def test_frequency_changes_preserve_accumulated_phase_and_cycle_count(self):
+        settings = {"speed_m_s": 0.02, "frequency_hz": 0.55, "duty_factor": 0.67,
+                    "swing_height_m": 0.015, "speed_ramp_s": 2.0,
+                    "touchdown_timeout_s": 0.12, "max_stance_slip_m": 0.04}
+        body = np.array([0.0, 0.0, 0.116])
+        nominal = {leg: self.feet["l_{}_toe".format(leg)] for leg in LEG_ORDER}
+        feet = {leg: point + body for leg, point in nominal.items()}
+        contacts = {leg: True for leg in LEG_ORDER}
+
+        gait = TripodGait(nominal, feet, body, 0.0, settings)
+        gait.update(0.0, feet, contacts)
+        before_change = gait.update(0.4, feet, contacts)
+        gait.set_parameters(0.4, frequency_hz=0.8)
+        at_change = gait.update(0.4, feet, contacts)
+        self.assertAlmostEqual(at_change["cycle_phase"], before_change["cycle_phase"])
+        after_change = gait.update(0.6, feet, contacts)
+        self.assertAlmostEqual(after_change["cycle_phase"], (0.4 * 0.55 + 0.2 * 0.8) % 1.0)
+        self.assertEqual(after_change["completed_cycles"], 0)
+        crossed_cycle = gait.update(1.4, feet, contacts)
+        self.assertAlmostEqual(crossed_cycle["cycle_phase"], (0.4 * 0.55 + 1.0 * 0.8) % 1.0)
+        self.assertEqual(crossed_cycle["completed_cycles"], 1)
+
+        fixed = TripodGait(nominal, feet, body, 0.0, settings)
+        for elapsed_s in (0.0, 0.4, 1.4, 2.0):
+            state = fixed.update(elapsed_s, feet, contacts)
+            phase = elapsed_s * settings["frequency_hz"]
+            self.assertAlmostEqual(state["cycle_phase"], phase % 1.0)
+            self.assertEqual(state["completed_cycles"], int(phase))
+
     def test_gait_start_requires_verified_continuous_stand(self):
         gate = StandStartGate(window_s=0.5, timeout_s=3.0)
         self.assertEqual(gate.update(0.0, True), "waiting")

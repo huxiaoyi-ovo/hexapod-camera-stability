@@ -22,18 +22,26 @@ if str(PROJECT_ROOT / "src") not in sys.path:
 from hexapod_robot import (JOINT_NAMES, LEG_ORDER, load_robot_model, lowest_stand_height,
                           map_named_values, pd_torque, stand_target_by_name)
 from hexapod_actuator import MitPdActuator
+from hexapod_body_compensation import (BoundedBodyCompensator, SETTINGS as BODY_COMPENSATION_SETTINGS,
+                                       body_reference_rotation)
+from hexapod_openshc import OpenShcBridge, openshc_source_provenance, resolve_bridge_executable
+from hexapod_sensing import ProprioceptiveContactOdometry
+from hexapod_terrain import build_terrain
 from hexapod_walk import (ControlCadence, StandStartGate, TripodGait, create_gait_after_stand_gate, feet_world,
-                          leg_fk_jacobian, leg_inverse_kinematics, walk_progress_failure)
+                          leg_fk_jacobian, leg_inverse_kinematics, quaternion_matrix_xyzw,
+                          walk_progress_failure)
 
 
 def _hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _runtime_provenance(project_root: Path, include_walk: bool = False) -> Dict[str, Any]:
+def _runtime_provenance(project_root: Path) -> Dict[str, Any]:
     """Describe the exact independent Python runtime inputs for this run."""
     runtime_files = ("src/hexapod_sim.py", "src/hexapod_robot.py", "scripts/run_hexapod_pilot.py",
-                     "src/hexapod_walk.py", "src/hexapod_actuator.py")
+                     "src/hexapod_walk.py", "src/hexapod_actuator.py", "src/hexapod_openshc.py",
+                     "src/hexapod_sensing.py", "src/hexapod_terrain.py",
+                     "src/hexapod_body_compensation.py")
     hashes = {relative: _hash(project_root / relative) for relative in runtime_files}
     try:
         revision = subprocess.run(
@@ -49,6 +57,38 @@ def _runtime_provenance(project_root: Path, include_walk: bool = False) -> Dict[
         git = {"available": True, "revision": revision or None, "dirty": bool(status.strip()),
                "status": "available"}
     return {"git": git, "runtime_dependency_sha256": hashes}
+
+
+def _trajectory_velocity_reference(q_target: np.ndarray, previous_q_target: Optional[np.ndarray],
+                                   held_velocity: np.ndarray, control_tick: bool,
+                                   control_period_s: float, max_velocity: np.ndarray):
+    """Update a ZOH joint-velocity reference from upper-rate position targets."""
+    target = np.asarray(q_target, dtype=float)
+    held = np.asarray(held_velocity, dtype=float)
+    limit = np.asarray(max_velocity, dtype=float)
+    if not control_tick:
+        return held.copy(), previous_q_target
+    if previous_q_target is None:
+        velocity = np.zeros_like(target)
+    else:
+        previous = np.asarray(previous_q_target, dtype=float)
+        velocity = (target - previous) / float(control_period_s)
+        velocity = np.clip(velocity, -limit, limit)
+    return velocity, target.copy()
+
+
+def _limit_joint_position_step(requested_qref: np.ndarray, previous_sent_qref: np.ndarray,
+                               hard_max_velocity: np.ndarray, command_limit_rad_s: float,
+                               control_period_s: float):
+    """Limit a new joint target relative to the reference actually sent last tick."""
+    requested = np.asarray(requested_qref, dtype=float)
+    previous = np.asarray(previous_sent_qref, dtype=float)
+    hard = np.asarray(hard_max_velocity, dtype=float)
+    operating = np.minimum(hard, float(command_limit_rad_s))
+    max_delta = operating * float(control_period_s)
+    delta = requested - previous
+    limited = previous + np.clip(delta, -max_delta, max_delta)
+    return limited, operating, np.abs(delta) > max_delta
 
 
 class _StandWindowTracker:
@@ -104,6 +144,8 @@ def load_config(path: Union[str, Path]) -> Dict[str, Any]:
     p, c, g, initial = config["physics"], config["control"], config["gate"], config.get("initial", {})
     if any(not isinstance(section, dict) for section in (p, c, g, initial, config["stand_reference_rad"])):
         raise ValueError("physics, control, gate, initial, and stand reference sections must be objects")
+    p.setdefault("max_depenetration_velocity_m_s", 100.0)
+    p.setdefault("bounce_threshold_velocity_m_s", 0.2)
     boolean_fields = ((p, ("gpu_pipeline", "gpu_physics", "self_collision", "fixed_base", "collapse_fixed_joints")),)
     if any(type(values.get(key)) is not bool for values, keys in boolean_fields for key in keys):
         raise ValueError("physics boolean flags must be explicitly configured as booleans")
@@ -120,7 +162,7 @@ def load_config(path: Union[str, Path]) -> Dict[str, Any]:
     control_period = config.get("control_period_s", p.get("dt_s"))
     numeric_groups = [
         ("duration_s", [config.get("duration_s")]),
-        ("physics", [p.get(k) for k in ("dt_s", "contact_offset_m", "rest_offset_m", "plane_static_friction", "plane_dynamic_friction", "plane_restitution")] + list(p.get("gravity_m_s2", []))),
+        ("physics", [p.get(k) for k in ("dt_s", "contact_offset_m", "rest_offset_m", "plane_static_friction", "plane_dynamic_friction", "plane_restitution", "max_depenetration_velocity_m_s", "bounce_threshold_velocity_m_s")] + list(p.get("gravity_m_s2", []))),
         ("control", [c.get(k) for k in ("kp_nm_rad", "kd_nm_s_rad", "effort_limit_nm", "joint_velocity_limit_rad_s", "position_tolerance_rad", "velocity_tolerance_rad_s")] + [control_period]),
         ("gate", [g.get(k) for k in ("eligible_after_s", "window_s", "max_abs_roll_pitch_rad", "max_linear_speed_m_s", "max_angular_speed_rad_s", "max_abs_vertical_speed_m_s", "max_tilt_rad", "contact_threshold_n")]),
         ("initial", list(initial.get("base_xy_m", [])) + [initial.get("yaw_rad"), initial.get("toe_clearance_m"), initial.get("base_z_min_m")]),
@@ -142,17 +184,69 @@ def load_config(path: Union[str, Path]) -> Dict[str, Any]:
         raise ValueError("stand reference values must be finite numbers")
     if config["duration_s"] <= 0 or p["dt_s"] <= 0 or c["effort_limit_nm"] <= 0 or c["joint_velocity_limit_rad_s"] <= 0:
         raise ValueError("duration, time step, torque limit, and velocity limit must be positive")
+    sensing = config.get("sensing", {"kind": "legacy_simulator"})
+    if not isinstance(sensing, dict) or sensing.get("kind", "legacy_simulator") not in ("legacy_simulator", "proprioceptive"):
+        raise ValueError("sensing.kind must be legacy_simulator or proprioceptive")
+    if sensing.get("kind") == "proprioceptive":
+        required_sensing = {"kind", "contact_on_threshold_n", "contact_off_threshold_n",
+                            "contact_confirmation_s", "force_filter_s", "minimum_support"}
+        if set(sensing) != required_sensing:
+            raise ValueError("proprioceptive sensing settings must be explicit and complete")
+        sensing_values = [sensing[key] for key in required_sensing - {"kind", "minimum_support"}]
+        if any(type(value) not in (int, float) or not math.isfinite(float(value)) for value in sensing_values):
+            raise ValueError("proprioceptive sensing values must be finite numbers")
+        if (type(sensing["minimum_support"]) is not int or not 1 <= sensing["minimum_support"] <= len(LEG_ORDER) or
+                not 0 <= sensing["contact_off_threshold_n"] < sensing["contact_on_threshold_n"] or
+                sensing["contact_confirmation_s"] <= 0 or sensing["force_filter_s"] <= 0):
+            raise ValueError("proprioceptive contact thresholds and support count are invalid")
+        if mode != "walk" or config.get("walk_controller", "python_tripod") != "python_tripod":
+            raise ValueError("proprioceptive sensing is enabled only for the Python tripod walk profile")
+        adaptation = config.get("walk", {}).get("terrain_adaptation")
+        required_adaptation = {"probe_speed_m_s", "probe_max_depth_m", "probe_timeout_s",
+                               "liftoff_timeout_s", "body_z_rate_m_s"}
+        if not isinstance(adaptation, dict) or set(adaptation) != required_adaptation:
+            raise ValueError("proprioceptive walk requires explicit bounded terrain adaptation settings")
+        if any(type(value) not in (int, float) or not math.isfinite(float(value))
+               for value in adaptation.values()):
+            raise ValueError("terrain adaptation settings must be finite numbers")
+        if any(float(adaptation[key]) <= 0 for key in required_adaptation):
+            raise ValueError("terrain adaptation speeds, limits, and timeouts must be positive")
+    compensation = config.get("body_compensation")
+    if compensation is not None:
+        if (not isinstance(compensation, dict) or set(compensation) != {"enabled"} or
+                type(compensation["enabled"]) is not bool):
+            raise ValueError("body_compensation must explicitly contain only a boolean enabled flag")
+        if (mode != "walk" or config.get("walk_controller", "python_tripod") != "python_tripod" or
+                sensing.get("kind") != "proprioceptive"):
+            raise ValueError("body compensation is available only for the proprioceptive Python tripod profile")
+    terrain_config = config.get("terrain", {"kind": "flat"})
+    if not isinstance(terrain_config, dict):
+        raise ValueError("terrain configuration must be an object")
+    build_terrain(terrain_config)
+    if "command_velocity_limit_rad_s" in c:
+        command_limit = c["command_velocity_limit_rad_s"]
+        if type(command_limit) not in (int, float) or not math.isfinite(float(command_limit)) or command_limit <= 0:
+            raise ValueError("control.command_velocity_limit_rad_s must be a positive finite number")
     cadence = ControlCadence(float(p["dt_s"]), float(control_period))
     if mode == "walk":
+        walk_controller = config.get("walk_controller", "python_tripod")
+        if walk_controller not in ("python_tripod", "openshc"):
+            raise ValueError("walk_controller must be python_tripod or openshc")
         if not math.isclose(float(p["dt_s"]), 0.0025, abs_tol=1e-12) or not math.isclose(float(control_period), 0.02, abs_tol=1e-12) or cadence.steps_per_update != 8:
             raise ValueError("walk mode requires 2.5 ms physics steps and an exact 20 ms control period")
         walk = config.get("walk")
         if not isinstance(walk, dict):
             raise ValueError("walk mode requires a walk settings object")
         actuator = config.get("actuator")
-        if not isinstance(actuator, dict) or set(actuator) != {
-                "kind", "internal_period_s", "command_delay_s", "torque_bandwidth_hz", "torque_feedforward_nm"}:
+        actuator_keys = {"kind", "internal_period_s", "command_delay_s", "torque_bandwidth_hz",
+                         "torque_feedforward_nm"}
+        if (not isinstance(actuator, dict) or not actuator_keys.issubset(actuator) or
+                set(actuator) - actuator_keys - {"velocity_reference", "velocity_feedback"}):
             raise ValueError("walk mode requires complete MIT_PD actuator settings")
+        if actuator.get("velocity_reference", "zero") not in ("zero", "trajectory"):
+            raise ValueError("actuator.velocity_reference must be zero or trajectory")
+        if actuator.get("velocity_feedback", "simulator") not in ("simulator", "encoder_difference"):
+            raise ValueError("actuator.velocity_feedback must be simulator or encoder_difference")
         if actuator.get("kind") != "MIT_PD":
             raise ValueError("walk mode requires actuator.kind=MIT_PD")
         actuator_values = [actuator.get(key) for key in
@@ -174,7 +268,9 @@ def load_config(path: Union[str, Path]) -> Dict[str, Any]:
         if (type(walk.get("min_support_contacts")) is not int or walk["min_support_contacts"] < 1 or
                 type(walk.get("minimum_cycles")) is not int or walk["minimum_cycles"] < 1):
             raise ValueError("walk support and minimum-cycle thresholds must be positive integers")
-        if (walk["speed_m_s"] <= 0 or walk["frequency_hz"] <= 0 or not 0.5 < walk["duty_factor"] < 1.0 or
+        duty_valid = (0.5 <= walk["duty_factor"] < 1.0 if walk_controller == "openshc"
+                      else 0.5 < walk["duty_factor"] < 1.0)
+        if (walk["speed_m_s"] <= 0 or walk["frequency_hz"] <= 0 or not duty_valid or
                 walk["swing_height_m"] <= 0 or walk["speed_ramp_s"] <= 0 or walk["start_timeout_s"] <= 0 or
                 walk["touchdown_timeout_s"] <= 0 or walk["max_stance_slip_m"] <= 0 or
                 walk["max_tracking_error_m"] <= 0 or not 0.0 < walk["max_saturation_fraction"] <= 1.0 or
@@ -182,12 +278,16 @@ def load_config(path: Union[str, Path]) -> Dict[str, Any]:
                 walk["slip_failure_s"] <= 0 or walk["minimum_net_forward_displacement_m"] <= 0 or
                 walk["minimum_completed_cycle_displacement_m"] <= 0):
             raise ValueError("walk settings are outside the supported low-speed tripod ranges")
+        if walk_controller == "openshc" and not math.isclose(float(walk["duty_factor"]), 0.5, abs_tol=1e-12):
+            raise ValueError("the OpenSHC prototype currently requires a 0.5 duty factor")
     if min(p["contact_offset_m"], p["rest_offset_m"], p["plane_static_friction"], p["plane_dynamic_friction"],
            p["plane_restitution"], c["kp_nm_rad"], c["kd_nm_s_rad"], c["position_tolerance_rad"],
            c["velocity_tolerance_rad_s"], g["eligible_after_s"], g["max_abs_roll_pitch_rad"],
-           g["max_linear_speed_m_s"], g["max_angular_speed_rad_s"], g["max_abs_vertical_speed_m_s"],
+           p["bounce_threshold_velocity_m_s"], g["max_linear_speed_m_s"], g["max_angular_speed_rad_s"], g["max_abs_vertical_speed_m_s"],
            g["max_tilt_rad"], g["contact_threshold_n"], initial["toe_clearance_m"]) < 0:
         raise ValueError("offsets, gains, tolerances, and gate thresholds must be nonnegative")
+    if p["max_depenetration_velocity_m_s"] <= 0:
+        raise ValueError("max_depenetration_velocity_m_s must be positive")
     if g["window_s"] <= 0 or len(initial["base_xy_m"]) != 2 or len(p["gravity_m_s2"]) != 3:
         raise ValueError("invalid gate window, contact count, base position, or gravity vector")
     if p["plane_restitution"] > 1.0 or initial["base_z_min_m"] <= 0:
@@ -195,6 +295,11 @@ def load_config(path: Union[str, Path]) -> Dict[str, Any]:
     robot_path = (PROJECT_ROOT / config["robot_urdf"]).resolve()
     model = load_robot_model(robot_path)
     stand_target_by_name(model, config["stand_reference_rad"])
+    if "command_velocity_limit_rad_s" in c:
+        hard_limits = [min(model.limits[name].velocity_rad_s, float(c["joint_velocity_limit_rad_s"]))
+                       for name in JOINT_NAMES]
+        if any(float(c["command_velocity_limit_rad_s"]) > limit for limit in hard_limits):
+            raise ValueError("command velocity limit cannot exceed any joint hard velocity limit")
     return config
 
 
@@ -212,20 +317,77 @@ def _orientation_to_rpy(quat: Iterable[float]):
 def _walk_control_targets(model, gait: TripodGait, elapsed_s: float, q_by_name: Dict[str, float],
                           body_xyz: np.ndarray, body_quat: np.ndarray,
                           contacts: Dict[str, bool], seed_by_name: Dict[str, float],
-                          measured_feet_world: Optional[Dict[str, np.ndarray]] = None):
+                          measured_feet_world: Optional[Dict[str, np.ndarray]] = None,
+                          body_compensator: Optional[BoundedBodyCompensator] = None,
+                          gyro_world_rad_s: Optional[np.ndarray] = None,
+                          estimated_body_velocity_m_s: Optional[np.ndarray] = None,
+                          control_period_s: float = 0.02):
     actual_feet = measured_feet_world or feet_world(model, q_by_name, body_xyz, body_quat)
     state = gait.update(elapsed_s, actual_feet, contacts)
     planned_body = np.asarray(state["planned_body_xyz_m"], dtype=float)
     c, s = math.cos(gait.yaw), math.sin(gait.yaw)
     nominal_rotation = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+    body_position = planned_body
+    body_rotation = nominal_rotation
+    if body_compensator is not None and body_compensator.enabled:
+        corrections = body_compensator.update(
+            body_quat, gyro_world_rad_s, body_xyz, estimated_body_velocity_m_s,
+            float(planned_body[2]))
+        body_position = planned_body + np.array([0.0, 0.0, corrections["height_m"]])
+        body_rotation = body_reference_rotation(gait.yaw, corrections["roll_rad"], corrections["pitch_rad"])
+    else:
+        corrections = {"roll_rad": 0.0, "pitch_rad": 0.0, "height_m": 0.0}
+    state["body_compensation"] = corrections
     q_targets = dict(seed_by_name)
     residuals = {}
     for leg in LEG_ORDER:
         target_world = np.asarray(state["desired_feet_world"][leg], dtype=float)
-        target_base = nominal_rotation.T @ (target_world - planned_body)
+        target_base = body_rotation.T @ (target_world - body_position)
         solved, residuals[leg] = leg_inverse_kinematics(model, leg, target_base, q_targets)
         q_targets.update(solved)
     return q_targets, state, actual_feet, residuals
+
+
+def _openshc_gait_state(response: Dict[str, Any], bridge: OpenShcBridge,
+                        start_xyz: np.ndarray, initial_yaw: float) -> Dict[str, Any]:
+    """Express native OpenSHC odometry targets in the initial yaw/world frame."""
+    c, s = math.cos(initial_yaw), math.sin(initial_yaw)
+    rotation = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+    planned_body_odom = np.asarray(response["planned_body_pose_odom"]["xyz_m"], dtype=float)
+    planned_body = np.asarray(start_xyz, dtype=float) + rotation @ planned_body_odom
+    desired_feet = {}
+    planned_support = {}
+    anchors = {}
+    phases = {}
+    for leg in LEG_ORDER:
+        native = response["legs"][leg]
+        toe_z = float(bridge.legs[leg]["plane_to_body_toe_z_m"])
+        target = np.asarray(native["foot_target_odom_m"], dtype=float) + np.array([0.0, 0.0, toe_z])
+        desired_feet[leg] = np.asarray(start_xyz, dtype=float) + rotation @ target
+        planned_support[leg] = bool(native["planned_support"])
+        phases[leg] = {"phase": int(native["phase"]), "state": int(native["state"]),
+                       "phase_progress": float(native["phase_progress"]),
+                       "joint_velocity_limit_active": native["joint_velocity_limit_active"],
+                       "joint_position_limit_active": native["joint_position_limit_active"],
+                       "ik_residual_m": float(native["ik_residual_m"]),
+                       "ik_quality": float(native["ik_quality"]),
+                       "foot_target_odom_m": native["foot_target_odom_m"],
+                       "q_target_rad": native["q_target_rad"],
+                       "dq_target_rad_s": native["dq_target_rad_s"]}
+    return {"desired_feet_world": desired_feet, "anchors_world": anchors,
+            "planned_support": planned_support, "planned_body_xyz_m": planned_body,
+            "cycle_phase": float(response["legs"]["rf"]["phase_progress"]),
+            "completed_cycles": int(response["completed_cycles"]),
+            "accepted_velocity_xy_m_s": response["accepted_velocity_xy_m_s"],
+            "legs": phases}
+
+
+def _openshc_velocity_command(speed_m_s: float) -> np.ndarray:
+    """Express forward speed in OpenSHC's fixed initial-yaw odometry frame."""
+    speed = float(speed_m_s)
+    if not math.isfinite(speed):
+        raise ValueError("OpenSHC forward speed must be finite")
+    return np.array([0.0, speed], dtype=float)
 
 
 def _prepare_output(root: Path) -> Path:
@@ -242,6 +404,9 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
     config_path = Path(config_path).resolve()
     config = load_config(config_path)
     sim_device = sim_device or config.get("sim_device", "cuda:0")
+    mode = config.get("mode", "stand")
+    walk_backend = config.get("walk_controller", "python_tripod") if mode == "walk" else None
+    openshc_executable = (resolve_bridge_executable(PROJECT_ROOT) if walk_backend == "openshc" else None)
     duration = float(duration_s if duration_s is not None else config["duration_s"])
     if not math.isfinite(duration) or duration <= 0:
         raise ValueError("duration must be positive and finite")
@@ -257,21 +422,52 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
     p = config["physics"]
     control = config["control"]
     gate = config["gate"]
-    mode = config.get("mode", "stand")
     walk_settings = config.get("walk", {})
+    sensing_config = config.get("sensing", {"kind": "legacy_simulator"})
+    sensing_mode = sensing_config.get("kind", "legacy_simulator")
+    compensation_enabled = bool(config.get("body_compensation", {}).get("enabled", False))
+    terrain_vertices, terrain_triangles, terrain_metadata = build_terrain(config.get("terrain", {"kind": "flat"}))
     control_period = float(config.get("control_period_s", dt))
     cadence = ControlCadence(dt, control_period)
     limits = model.limits
     asset_paths = [urdf_path] + sorted((PROJECT_ROOT / "assets/hexapod/two_set_meshes/visual").glob("*.dae")) + sorted((PROJECT_ROOT / "assets/hexapod/two_set_meshes/collision").glob("*.obj"))
     resolved = dict(config)
+    hard_velocity_by_name = {name: min(limits[name].velocity_rad_s,
+                                       float(control["joint_velocity_limit_rad_s"])) for name in JOINT_NAMES}
+    operating_velocity_by_name = {
+        name: min(limit, float(control["command_velocity_limit_rad_s"]))
+        if "command_velocity_limit_rad_s" in control else limit
+        for name, limit in hard_velocity_by_name.items()}
     resolved["resolved"] = {"config_path": str(config_path), "robot_urdf_sha256": _hash(urdf_path),
                             "asset_sha256": {str(x.relative_to(PROJECT_ROOT)): _hash(x) for x in asset_paths},
                             "derived_start_base_z_m": start_z, "sim_device": sim_device, "duration_s": duration,
-                            "provenance": _runtime_provenance(PROJECT_ROOT, include_walk=(mode == "walk"))}
+                            "joint_velocity_limits_rad_s": {
+                                name: {"hard": hard_velocity_by_name[name],
+                                       "operating": operating_velocity_by_name[name]}
+                                for name in JOINT_NAMES},
+                            "terrain": terrain_metadata,
+                            "sensing": {"kind": sensing_mode,
+                                        "contact_force_source": "previous modeled applied motor torque via local URDF Jacobian"
+                                        if sensing_mode == "proprioceptive" else "simulator_contact_diagnostic"},
+                            "provenance": _runtime_provenance(PROJECT_ROOT)}
+    if sensing_mode == "proprioceptive":
+        resolved["resolved"]["sensing"].update({
+            "attitude_source": "ideal simulator quaternion treated as an IMU sample; uncalibrated",
+            "initialization_assumption": "known flat start; body xy from configuration, body z from local URDF, all six toe anchors initialized at toe radius",
+            "odometry_minimum_confirmed_support": int(sensing_config["minimum_support"])})
+    resolved["resolved"]["body_compensation"] = {
+        "enabled": compensation_enabled,
+        "input_sources": ["support-foot odometry", "ideal IMU quaternion", "ideal IMU gyro sample", "estimated body velocity"],
+        "feedback_gains_and_limits": BODY_COMPENSATION_SETTINGS,
+        "correction_applied_after_gait_start_only": True,
+        "corrected_pose_is_not_gait_tracking_nominal": True}
+    if openshc_executable is not None:
+        resolved["resolved"]["openshc"] = openshc_source_provenance(PROJECT_ROOT, openshc_executable)
     (out / "resolved_config.json").write_text(json.dumps(resolved, indent=2) + "\n")
 
     gym = sim = viewer = gymapi = None
     csv_file = None
+    openshc_bridge = None
     status: Dict[str, Any] = {"kind": "walk_diagnostic" if mode == "walk" else "stand_diagnostic", "status": "started", "failure_reason": None,
                               "valid_training_data": False, "start_base_z_m": start_z,
                               "configured_initial_base_velocity_m_s": [0.0, 0.0, 0.0],
@@ -279,13 +475,16 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
                               "initial_joint_target_by_name_rad": qref_named,
                               "duration_requested_s": duration, "sample_count": 0,
                               "stable_gate_passed": False, "gate_rejection_counts": {},
-                              "mode": mode, "control_period_s": control_period,
+                              "mode": mode, "walk_controller": walk_backend,
+                              "control_period_s": control_period,
                               "control_steps_per_update": cadence.steps_per_update,
                               "controller_effort_source": "stand explicit effort PD" if config.get("mode", "stand") == "stand" else "50 Hz position target with modeled 400 Hz MIT_PD actuator",
                               "modeled_motor_delay_s": config.get("actuator", {}).get("command_delay_s", 0.0),
                               "motor_torque_bandwidth_hz": config.get("actuator", {}).get("torque_bandwidth_hz"),
                               "motor_torque_bandwidth_calibrated": False,
                               "actuator_torque_is_model_output_not_measured": True,
+                              "body_compensation_enabled": compensation_enabled,
+                              "body_compensation_settings": BODY_COMPENSATION_SETTINGS,
                               "initialization_stage": "pre_native"}
     status_path = out / "status.json"
     status_path.write_text(json.dumps(status, indent=2) + "\n")
@@ -310,6 +509,8 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
         sim_params.physx.num_velocity_iterations = int(p["velocity_iterations"])
         sim_params.physx.contact_offset = float(p["contact_offset_m"])
         sim_params.physx.rest_offset = float(p["rest_offset_m"])
+        sim_params.physx.max_depenetration_velocity = float(p["max_depenetration_velocity_m_s"])
+        sim_params.physx.bounce_threshold_velocity = float(p["bounce_threshold_velocity_m_s"])
         device_type, device_id = sim_device.split(":", 1)
         if device_type != "cuda" or int(device_id) < 0:
             raise ValueError("GPU PhysX requires --sim-device cuda:<index>")
@@ -326,6 +527,17 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
         plane.restitution = float(p["plane_restitution"])
         _mark_initialization_stage(status_path, status, "add_ground")
         gym.add_ground(sim, plane)
+        if terrain_triangles.size:
+            terrain_params = gymapi.TriangleMeshParams()
+            terrain_params.nb_vertices = int(terrain_vertices.shape[0])
+            terrain_params.nb_triangles = int(terrain_triangles.shape[0])
+            terrain_params.transform.p.x = 0.0
+            terrain_params.transform.p.y = 0.0
+            terrain_params.static_friction = float(p["plane_static_friction"])
+            terrain_params.dynamic_friction = float(p["plane_dynamic_friction"])
+            terrain_params.restitution = float(p["plane_restitution"])
+            gym.add_triangle_mesh(sim, terrain_vertices.flatten(),
+                                  terrain_triangles.flatten().astype(np.uint32, copy=False), terrain_params)
         asset_options = gymapi.AssetOptions()
         asset_options.fix_base_link = bool(p["fixed_base"])
         asset_options.collapse_fixed_joints = bool(p["collapse_fixed_joints"])
@@ -362,20 +574,45 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
         lower = map_named_values({n: limits[n].lower_rad for n in sim_dof_names}, sim_dof_names)
         upper = map_named_values({n: limits[n].upper_rad for n in sim_dof_names}, sim_dof_names)
         max_velocity = map_named_values({n: min(limits[n].velocity_rad_s, control["joint_velocity_limit_rad_s"]) for n in sim_dof_names}, sim_dof_names)
+        operating_velocity = map_named_values(operating_velocity_by_name, sim_dof_names)
         dof_props = gym.get_actor_dof_properties(env, actor)
         dof_props["driveMode"].fill(gymapi.DOF_MODE_EFFORT)
         dof_props["stiffness"].fill(0.0)
         dof_props["damping"].fill(0.0)
+        if "command_velocity_limit_rad_s" in control:
+            dof_props["velocity"][:] = operating_velocity
         gym.set_actor_dof_properties(env, actor, dof_props)
+        if "command_velocity_limit_rad_s" in control:
+            applied_dof_props = gym.get_actor_dof_properties(env, actor)
+            if not np.allclose(applied_dof_props["velocity"], operating_velocity, rtol=0.0, atol=1e-6):
+                raise RuntimeError("Gym did not retain the configured operating DOF velocity limits")
         dof_state = gym.get_actor_dof_states(env, actor, gymapi.STATE_ALL)
         dof_state["pos"][:] = qref
         dof_state["vel"][:] = 0.0
         gym.set_actor_dof_states(env, actor, dof_state, gymapi.STATE_ALL)
+        proprioceptive = None
+        proprioceptive_state = None
+        previous_estimated_body_xyz = None
+        estimated_body_velocity = np.zeros(3, dtype=float)
+        if sensing_mode == "proprioceptive":
+            initial_yaw = float(initial["yaw_rad"])
+            initial_quaternion = np.array([0.0, 0.0, math.sin(initial_yaw / 2.0), math.cos(initial_yaw / 2.0)])
+            initial_body_xyz = np.array([float(initial["base_xy_m"][0]),
+                                         float(initial["base_xy_m"][1]), start_z])
+            proprioceptive = ProprioceptiveContactOdometry(
+                model, initial_body_xyz, initial_quaternion, qref_named, model.toe_radius_m,
+                float(sensing_config["contact_on_threshold_n"]),
+                float(sensing_config["contact_off_threshold_n"]),
+                float(sensing_config["contact_confirmation_s"]),
+                float(sensing_config["force_filter_s"]), int(sensing_config["minimum_support"]))
+            proprioceptive_state = proprioceptive.snapshot()
+            previous_estimated_body_xyz = proprioceptive_state["body_xyz_m"].copy()
         body_names = list(gym.get_actor_rigid_body_names(env, actor))
         body_dict = gym.get_actor_rigid_body_dict(env, actor)
         toe_body_indices = {leg: int(gym.get_actor_rigid_body_index(env, actor, body_dict["l_{}_toe".format(leg)], gymapi.DOMAIN_SIM)) for leg in LEG_ORDER}
         toe_body_local_indices = {leg: int(body_dict["l_{}_toe".format(leg)]) for leg in LEG_ORDER}
         root_body_index = body_dict[model.root_link]
+        root_body_sim_index = int(gym.get_actor_rigid_body_index(env, actor, root_body_index, gymapi.DOMAIN_SIM))
         pre_dof = gym.get_actor_dof_states(env, actor, gymapi.STATE_ALL)
         pre_rb = gym.get_actor_rigid_body_states(env, actor, gymapi.STATE_ALL)
         pre_root = pre_rb["pose"][root_body_index]
@@ -407,25 +644,55 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
                  "contact_legs", "max_abs_roll_pitch_rad", "linear_speed_m_s", "angular_speed_rad_s",
                  "limit_violation", "torque_saturated_count", "control_update", "control_tick_index",
                  "actuator_update", "toe_fk_error_max_m"]
+        names.extend("body_contact_force_{}_n".format(axis) for axis in "xyz")
         if mode == "walk":
             names.extend(["gait_started", "gait_elapsed_s", "gait_cycle_phase", "commanded_speed_m_s",
-                          "achieved_forward_speed_m_s", "planned_body_x_m", "planned_body_y_m",
-                          "planned_body_z_m", "body_tracking_error_m", "planned_support_contact_count",
+                          "openshc_requested_speed_m_s", "openshc_accepted_speed_m_s",
+                          "openshc_control_tick", "openshc_completed_cycles",
+                          "achieved_forward_speed_m_s", "estimated_forward_speed_m_s",
+                          "planned_body_x_m", "planned_body_y_m", "planned_body_z_m",
+                          "body_tracking_error_m", "planned_support_contact_count",
+                          "estimated_planned_support_contact_count", "confirmed_support_count",
+                          "body_compensation_enabled", "body_compensation_roll_rad",
+                          "body_compensation_pitch_rad", "body_compensation_height_m",
                           "stance_slip_count", "max_stance_slip_m", "max_ik_residual_m"])
             for leg in LEG_ORDER:
+                names.extend(["contact_force_{}_{}_n".format(leg, axis) for axis in "xyz"])
                 names.extend(["actual_foot_{}_{}_m".format(leg, axis) for axis in "xyz"])
                 names.extend(["fk_foot_{}_{}_m".format(leg, axis) for axis in "xyz"])
                 names.append("toe_fk_error_{}_m".format(leg))
                 names.extend(["desired_foot_{}_{}_m".format(leg, axis) for axis in "xyz"])
                 names.extend(["anchor_{}_{}_m".format(leg, axis) for axis in "xyz"])
                 names.extend(["planned_support_" + leg, "measured_contact_" + leg,
+                              "confirmed_contact_" + leg,
                               "stance_slip_{}_m".format(leg), "ik_residual_{}_m".format(leg)])
+                names.append("contact_estimated_up_force_{}_n".format(leg))
+                if sensing_mode == "proprioceptive":
+                    names.extend(["estimated_contact_" + leg,
+                                  "estimated_filtered_up_force_{}_n".format(leg)])
+                    names.extend(["estimated_force_{}_{}_n".format(leg, axis) for axis in "xyz"])
+                    names.extend(["estimated_foot_{}_{}_m".format(leg, axis) for axis in "xyz"])
+                names.extend(["openshc_phase_" + leg, "openshc_state_" + leg,
+                              "openshc_phase_progress_" + leg])
+                names.extend(["openshc_foot_target_{}_{}_m".format(leg, axis) for axis in "xyz"])
+                for joint in ("thigh", "knee", "ankle"):
+                    names.extend(["openshc_q_target_j_{}_{}_rad".format(leg, joint),
+                                  "openshc_dq_target_j_{}_{}_rad_s".format(leg, joint),
+                                  "openshc_velocity_limit_j_{}_{}".format(leg, joint),
+                                  "openshc_position_limit_j_{}_{}".format(leg, joint)])
+                names.extend(["openshc_ik_quality_" + leg])
             for n in sim_dof_names:
                 names.extend(["qref_delayed_" + n, "dqref_command_" + n, "dqref_delayed_" + n,
                               "tau_raw_" + n, "tau_requested_" + n, "tau_ff_command_" + n,
                               "tau_ff_delayed_" + n, "tau_applied_model_" + n, "actuator_saturated_" + n])
+            if sensing_mode == "proprioceptive":
+                names.extend(["estimated_body_x_m", "estimated_body_y_m", "estimated_body_z_m",
+                              "estimated_vx_m_s", "estimated_vy_m_s", "estimated_vz_m_s",
+                              "estimated_support_count", "ideal_imu_roll_rad", "ideal_imu_pitch_rad"])
         for n in sim_dof_names:
             names.extend(["q_" + n, "dq_" + n, "tau_" + n, "qref_" + n])
+            if mode == "walk":
+                names.append("dq_feedback_" + n)
         csv_file = (out / "trace.csv").open("w", newline="")
         writer = csv.DictWriter(csv_file, fieldnames=names)
         writer.writeheader()
@@ -434,12 +701,22 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
                        "control_period_s": control_period, "control_steps_per_update": cadence.steps_per_update,
                        "position_iterations": p["position_iterations"], "velocity_iterations": p["velocity_iterations"],
                        "contact_offset_m": p["contact_offset_m"], "rest_offset_m": p["rest_offset_m"],
+                       "max_depenetration_velocity_m_s": p["max_depenetration_velocity_m_s"],
+                       "bounce_threshold_velocity_m_s": p["bounce_threshold_velocity_m_s"],
                        "solver_type": p["solver_type"], "solver_type_enum": 1, "up_axis": "Z", "self_collision": bool(p["self_collision"]),
                        "fixed_base": bool(p["fixed_base"]), "collapse_fixed_joints": bool(p["collapse_fixed_joints"])},
                        "python_version": platform.python_version(), "numpy_version": np.__version__,
                        "torch_version": torch.__version__, "torch_cuda_available": torch.cuda.is_available(),
                        "sim_dof_names": sim_dof_names, "sim_body_names": body_names,
+                       "joint_velocity_limits_rad_s": {
+                           name: {"hard": float(max_velocity[index]),
+                                  "operating": float(operating_velocity[index])}
+                           for index, name in enumerate(sim_dof_names)},
+                       "gym_operating_velocity_limit_applied": ("command_velocity_limit_rad_s" in control),
                        "toe_body_indices_sim": toe_body_indices,
+                       "actuator_velocity_feedback_source": (config.get("actuator", {}).get("velocity_feedback", "simulator")
+                                                              if mode == "walk" else "simulator_raw"),
+                       "joint_velocity_protection_source": "raw_gym_dof_velocity",
                        "control_cadence": {"period_s": control_period, "physics_steps_per_update": cadence.steps_per_update,
                                            "upper_target_update_hz": 1.0 / control_period,
                                            "actuator_internal_period_s": config.get("actuator", {}).get("internal_period_s", dt),
@@ -453,6 +730,12 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
         walk_start_gate = StandStartGate(float(gate["window_s"]), float(walk_settings["start_timeout_s"])) if mode == "walk" else None
         gait = None
         gait_state = None
+        openshc_bridge = None
+        openshc_start_xyz = None
+        openshc_start_yaw = None
+        openshc_anchor_world = None
+        openshc_previous_support = {leg: False for leg in LEG_ORDER}
+        openshc_last_response = None
         gait_start_time = None
         walk_start_verified_at = None
         stand_start_verified = False
@@ -462,6 +745,7 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
         support_mismatch_ticks = 0
         slip_consecutive = {leg: 0 for leg in LEG_ORDER}
         support_contact_samples = 0
+        estimated_support_contact_samples = 0
         planned_support_samples = 0
         slip_samples = 0
         slip_events = 0
@@ -472,54 +756,151 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
         q_error_max = 0.0
         tracking_error_max = 0.0
         cycle_progress = []
+        estimated_cycle_progress = []
         last_cycle_index = 0
         cycle_start_progress = 0.0
+        estimated_cycle_start_progress = 0.0
         initial_walk_xyz = None
+        initial_walk_truth_xyz = None
         walk_forward = None
         stable = False
         held_tau = np.zeros_like(qref)
         held_saturated = np.zeros_like(qref, dtype=bool)
+        velocity_reference_mode = config.get("actuator", {}).get("velocity_reference", "zero")
+        velocity_feedback_mode = config.get("actuator", {}).get("velocity_feedback", "simulator")
+        body_compensator = (BoundedBodyCompensator(compensation_enabled, control_period)
+                            if "body_compensation" in config else None)
+        if proprioceptive_state is not None:
+            controller_xyz = proprioceptive_state["body_xyz_m"].copy()
+            controller_quat = proprioceptive_state["imu_quaternion_xyzw"].copy()
+            controller_feet_world = {leg: value.copy() for leg, value in proprioceptive_state["feet_world_m"].items()}
+            controller_contacts = dict(proprioceptive_state["contact_confirmed"])
+        else:
+            controller_xyz = None
+            controller_quat = None
+            controller_feet_world = None
+            controller_contacts = None
+        controller_gyro_world = np.zeros(3, dtype=float)
+        held_dqref = np.zeros_like(qref)
+        previous_trajectory_qref = None
+        previous_sent_qref = qref.copy()
+        qref_rate_clamped_samples = 0
+        qref_rate_reference_samples = 0
+        encoder_previous_q = None
         control_tick_count = 0
         max_steps = int(math.ceil(duration / dt))
         failure = None
         interrupted_by_viewer = False
         last_measured_state = None
         toe_fk_error_max_observed = 0.0
+        max_abs_roll_pitch_observed = 0.0
+        body_z_min_observed = float("inf")
+        body_z_max_observed = float("-inf")
+        max_root_contact_force_n = 0.0
         for step in range(max_steps):
             dof = gym.get_actor_dof_states(env, actor, gymapi.STATE_ALL)
-            q = np.asarray(dof["pos"], dtype=np.float32)
-            dq = np.asarray(dof["vel"], dtype=np.float32)
+            q = np.asarray(dof["pos"], dtype=np.float32).copy()
+            dq = np.asarray(dof["vel"], dtype=np.float32).copy()
+            if mode == "walk":
+                measured_q_sample = q.copy()
+                if encoder_previous_q is None:
+                    dq_encoder = np.zeros_like(measured_q_sample)
+                else:
+                    dq_encoder = (measured_q_sample - encoder_previous_q) / dt
+                encoder_previous_q = measured_q_sample.copy()
+                dq_feedback = dq_encoder if velocity_feedback_mode == "encoder_difference" else dq
+            else:
+                dq_encoder = np.zeros_like(q)
+                dq_feedback = dq
             control_update = cadence.is_tick(step)
             control_tick_index = cadence.tick_index(step)
             if control_update:
                 if mode == "walk":
                     try:
-                        rb_control = gym.get_actor_rigid_body_states(env, actor, gymapi.STATE_ALL)
-                        root_control = rb_control["pose"][root_body_index]
-                        xyz_control = np.array([root_control["p"][k] for k in ("x", "y", "z")], dtype=float)
-                        quat_control = np.array([root_control["r"][k] for k in ("x", "y", "z", "w")], dtype=float)
+                        if sensing_mode == "proprioceptive":
+                            xyz_control = controller_xyz.copy()
+                            quat_control = controller_quat.copy()
+                        else:
+                            rb_control = gym.get_actor_rigid_body_states(env, actor, gymapi.STATE_ALL)
+                            root_control = rb_control["pose"][root_body_index]
+                            xyz_control = np.array([root_control["p"][k] for k in ("x", "y", "z")], dtype=float)
+                            quat_control = np.array([root_control["r"][k] for k in ("x", "y", "z", "w")], dtype=float)
                         q_control_by_name = {name: float(q[index]) for index, name in enumerate(sim_dof_names)}
-                        if gait is not None and not stand_only:
-                            contact_control = contact_tensor.detach().cpu().numpy()
-                            contact_map = {leg: float(np.linalg.norm(contact_control[idx])) > float(gate["contact_threshold_n"])
-                                           for leg, idx in toe_body_indices.items()}
-                            feet_control_world = {leg: np.array([rb_control["pose"][toe_body_local_indices[leg]]["p"][axis]
-                                                                  for axis in ("x", "y", "z")], dtype=float)
-                                                  for leg in LEG_ORDER}
+                        if walk_backend == "openshc" and openshc_bridge is not None and not stand_only:
+                            gait_elapsed = max(0.0, step * dt - gait_start_time)
+                            requested_speed = float(walk_settings["speed_m_s"]) * min(
+                                1.0, gait_elapsed / float(walk_settings["speed_ramp_s"]))
+                            response = openshc_bridge.step(_openshc_velocity_command(requested_speed),
+                                                           0.0, q_control_by_name)
+                            openshc_last_response = response
+                            qref_named = response["q_target_by_name_rad"]
+                            qref = map_named_values(qref_named, sim_dof_names)
+                            gait_state = _openshc_gait_state(response, openshc_bridge,
+                                                             openshc_start_xyz, openshc_start_yaw)
+                            gait_state["anchors_world"] = openshc_anchor_world
+                            current_ik_residuals = {leg: float(response["legs"][leg]["ik_residual_m"])
+                                                    for leg in LEG_ORDER}
+                            status["gait_control_ticks"] = status.get("gait_control_ticks", 0) + 1
+                            status["openshc_last_request"] = {
+                                "requested_speed_m_s": requested_speed,
+                                "accepted_velocity_xy_m_s": response["accepted_velocity_xy_m_s"],
+                                "accepted_speed_m_s": float(np.linalg.norm(response["accepted_velocity_xy_m_s"])),
+                                "upper_control_tick": response["tick"],
+                                "completed_cycles": response["completed_cycles"]}
+                        elif walk_backend == "python_tripod" and gait is not None and not stand_only:
+                            if sensing_mode == "proprioceptive":
+                                contact_map = dict(controller_contacts)
+                                feet_for_controller = controller_feet_world
+                            else:
+                                contact_control = contact_tensor.detach().cpu().numpy()
+                                contact_map = {leg: float(np.linalg.norm(contact_control[idx])) > float(gate["contact_threshold_n"])
+                                               for leg, idx in toe_body_indices.items()}
+                                feet_for_controller = {leg: np.array([rb_control["pose"][toe_body_local_indices[leg]]["p"][axis]
+                                                                       for axis in ("x", "y", "z")], dtype=float)
+                                                       for leg in LEG_ORDER}
                             qref_named, gait_state, _, current_ik_residuals = _walk_control_targets(
                                 model, gait, max(0.0, step * dt - gait_start_time), q_control_by_name,
-                                xyz_control, quat_control, contact_map, qref_named, feet_control_world)
+                                xyz_control, quat_control, contact_map, qref_named, feet_for_controller,
+                                body_compensator=body_compensator,
+                                gyro_world_rad_s=controller_gyro_world,
+                                estimated_body_velocity_m_s=estimated_body_velocity,
+                                control_period_s=control_period)
+                            if proprioceptive is not None:
+                                proprioceptive.set_support_mask(gait_state["confirmed_support"],
+                                                                controller_feet_world)
+                                proprioceptive_state = proprioceptive.snapshot()
+                                controller_xyz = proprioceptive_state["body_xyz_m"].copy()
+                                controller_feet_world = {leg: value.copy() for leg, value in
+                                                         proprioceptive_state["feet_world_m"].items()}
+                                controller_contacts = dict(proprioceptive_state["contact_confirmed"])
                             qref = map_named_values(qref_named, sim_dof_names)
                             status["gait_control_ticks"] = status.get("gait_control_ticks", 0) + 1
                     except (ValueError, RuntimeError, np.linalg.LinAlgError, KeyError) as exc:
                         failure = "walk_control_failure: {}".format(exc)
                         break
+                    if (not stand_only and walk_started and
+                            "command_velocity_limit_rad_s" in control):
+                        qref, _, qref_rate_clamped = _limit_joint_position_step(
+                            qref, previous_sent_qref, max_velocity,
+                            float(control["command_velocity_limit_rad_s"]), control_period)
+                        qref_rate_clamped_samples += int(np.count_nonzero(qref_rate_clamped))
+                        qref_rate_reference_samples += int(qref.size)
+                        previous_sent_qref = qref.copy()
                 else:
                     held_tau, held_saturated = pd_torque(q, dq, qref, float(control["kp_nm_rad"]),
                                                          float(control["kd_nm_s_rad"]), effort_limits)
                 control_tick_count += 1
             if mode == "walk":
-                actuator_sample = mit_actuator.step(q, dq, qref, command_feedforward_nm=actuator_feedforward)
+                if velocity_reference_mode == "trajectory" and walk_started:
+                    held_dqref, previous_trajectory_qref = _trajectory_velocity_reference(
+                        qref, previous_trajectory_qref, held_dqref, control_update,
+                        control_period, max_velocity)
+                else:
+                    held_dqref = np.zeros_like(qref)
+                    previous_trajectory_qref = None
+            if mode == "walk":
+                actuator_sample = mit_actuator.step(q, dq_feedback, qref, command_velocity_rad_s=held_dqref,
+                                                    command_feedforward_nm=actuator_feedforward)
                 tau = actuator_sample["applied_model_torque_nm"].astype(np.float32)
                 saturated = actuator_sample["torque_saturated"]
                 gym.apply_actor_dof_efforts(env, actor, tau)
@@ -527,12 +908,13 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
                 actuator_sample = None
                 tau, saturated = held_tau, held_saturated
                 gym.apply_actor_dof_efforts(env, actor, tau)
+            q_before_physics = q.copy()
             gym.simulate(sim)
             gym.fetch_results(sim, True)
             gym.refresh_net_contact_force_tensor(sim)
             dof = gym.get_actor_dof_states(env, actor, gymapi.STATE_ALL)
-            q = np.asarray(dof["pos"], dtype=float)
-            dq = np.asarray(dof["vel"], dtype=float)
+            q = np.asarray(dof["pos"], dtype=float).copy()
+            dq = np.asarray(dof["vel"], dtype=float).copy()
             rb = gym.get_actor_rigid_body_states(env, actor, gymapi.STATE_ALL)
             root_pose = rb["pose"][root_body_index]
             root_vel = rb["vel"][root_body_index]
@@ -563,6 +945,25 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
                 failure = "nonfinite_measured_state"
             elif not quat_valid:
                 failure = "invalid_root_quaternion"
+            if (proprioceptive is not None and state_finite and quat_valid and
+                    cadence.is_tick(step + 1)):
+                tau_by_name = {name: float(tau[index]) for index, name in enumerate(sim_dof_names)}
+                proprioceptive_state = proprioceptive.update(
+                    q_by_name, quat, tau_by_name, control_period)
+                controller_xyz = proprioceptive_state["body_xyz_m"].copy()
+                controller_quat = proprioceptive_state["imu_quaternion_xyzw"].copy()
+                controller_gyro_world = omega.copy()
+                controller_feet_world = {leg: value.copy() for leg, value in
+                                          proprioceptive_state["feet_world_m"].items()}
+                controller_contacts = dict(proprioceptive_state["contact_confirmed"])
+                estimated_body_velocity = (controller_xyz - previous_estimated_body_xyz) / control_period
+                previous_estimated_body_xyz = controller_xyz.copy()
+            elif proprioceptive is None:
+                estimated_body_velocity = vel.copy()
+            controller_xyz = xyz.copy() if proprioceptive is None else controller_xyz
+            controller_quat = quat.copy() if proprioceptive is None else controller_quat
+            controller_contacts = foot_contacts if proprioceptive is None else controller_contacts
+            controller_feet_world = measured_feet_world if proprioceptive is None else controller_feet_world
             if failure:
                 roll = pitch = yaw = float("nan")
             else:
@@ -572,23 +973,49 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
             contact_count = sum(foot_contacts.values())
             linear_speed = float(np.linalg.norm(vel))
             angular_speed = float(np.linalg.norm(omega))
+            controller_roll, controller_pitch, controller_yaw = _orientation_to_rpy(controller_quat)
+            controller_contact_count = sum(controller_contacts.values())
+            controller_linear_speed = float(np.linalg.norm(estimated_body_velocity))
+            controller_angular_speed = angular_speed
             pos_bad = bool(state_finite and (np.any(q < lower - float(control["position_tolerance_rad"])) or np.any(q > upper + float(control["position_tolerance_rad"]))))
             vel_bad = bool(state_finite and np.any(np.abs(dq) > max_velocity + float(control["velocity_tolerance_rad_s"])))
             t = (step + 1) * dt
-            gait_row = {}
-            if mode == "walk" and gait is not None and gait_state is not None:
+            if math.isfinite(roll) and math.isfinite(pitch):
+                max_abs_roll_pitch_observed = max(max_abs_roll_pitch_observed, abs(roll), abs(pitch))
+            body_z_min_observed = min(body_z_min_observed, float(xyz[2]))
+            body_z_max_observed = max(body_z_max_observed, float(xyz[2]))
+            max_root_contact_force_n = max(max_root_contact_force_n,
+                                           float(np.linalg.norm(contact_np[root_body_sim_index])))
+            gait_row = {"body_compensation_enabled": int(compensation_enabled),
+                        "body_compensation_roll_rad": 0.0,
+                        "body_compensation_pitch_rad": 0.0,
+                        "body_compensation_height_m": 0.0}
+            if mode == "walk" and walk_backend == "openshc" and gait_state is not None:
+                for leg in LEG_ORDER:
+                    support_now = bool(gait_state["planned_support"][leg])
+                    if support_now and not openshc_previous_support[leg] and foot_contacts[leg]:
+                        openshc_anchor_world[leg] = measured_feet_world[leg].copy()
+                    openshc_previous_support[leg] = support_now
+                gait_state["anchors_world"] = openshc_anchor_world
+            if mode == "walk" and gait_state is not None:
                 desired_feet = gait_state["desired_feet_world"]
                 anchors = gait_state["anchors_world"]
                 planned_support = gait_state["planned_support"]
                 planned_body = np.asarray(gait_state["planned_body_xyz_m"], dtype=float)
-                valid_support_count = sum(bool(planned_support[leg]) and foot_contacts[leg] for leg in LEG_ORDER)
+                estimated_valid_support_count = sum(bool(planned_support[leg]) and controller_contacts[leg]
+                                                     for leg in LEG_ORDER)
+                truth_valid_support_count = sum(bool(planned_support[leg]) and foot_contacts[leg]
+                                                for leg in LEG_ORDER)
                 support_count = sum(bool(planned_support[leg]) for leg in LEG_ORDER)
                 planned_support_samples += support_count
-                support_contact_samples += valid_support_count
-                support_mismatch_ticks = support_mismatch_ticks + 1 if valid_support_count < int(walk_settings["min_support_contacts"]) else 0
+                support_contact_samples += truth_valid_support_count
+                estimated_support_contact_samples += estimated_valid_support_count
+                support_guard_count = (sum(bool(value) for value in gait_state["confirmed_support"].values())
+                                       if proprioceptive_state is not None else truth_valid_support_count)
+                support_mismatch_ticks = support_mismatch_ticks + 1 if support_guard_count < int(walk_settings["min_support_contacts"]) else 0
                 slip_by_leg = {}
                 for leg in LEG_ORDER:
-                    slip = float(np.linalg.norm(measured_feet_world[leg] - anchors[leg])) if planned_support[leg] and foot_contacts[leg] else 0.0
+                    slip = float(np.linalg.norm(controller_feet_world[leg] - anchors[leg])) if planned_support[leg] and controller_contacts[leg] else 0.0
                     slip_by_leg[leg] = slip
                     if slip > float(walk_settings["max_stance_slip_m"]):
                         slip_samples += 1
@@ -598,34 +1025,66 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
                     else:
                         slip_consecutive[leg] = 0
                 max_slip = max(slip_by_leg.values(), default=0.0)
-                tracking_error = float(np.linalg.norm(xyz - planned_body))
+                tracking_error = float(np.linalg.norm(controller_xyz - planned_body))
                 tracking_error_max = max(tracking_error_max, tracking_error)
                 max_ik = max(current_ik_residuals.values(), default=0.0)
                 gait_elapsed = max(0.0, t - gait_start_time)
-                cycle_index = int(math.floor(gait_elapsed * float(walk_settings["frequency_hz"]) + 1e-9))
-                progress = float(np.dot(xyz - initial_walk_xyz, walk_forward))
+                cycle_index = (openshc_bridge.completed_cycles if walk_backend == "openshc" else
+                               int(gait_state["completed_cycles"]))
+                progress = float(np.dot(xyz - initial_walk_truth_xyz, walk_forward))
+                estimated_progress = float(np.dot(controller_xyz - initial_walk_xyz, walk_forward))
                 while cycle_index > last_cycle_index:
                     cycle_progress.append(progress - cycle_start_progress)
+                    estimated_cycle_progress.append(estimated_progress - estimated_cycle_start_progress)
                     cycle_start_progress = progress
+                    estimated_cycle_start_progress = estimated_progress
                     last_cycle_index += 1
                 commanded_speed = float(walk_settings["speed_m_s"]) * min(1.0, gait_elapsed / float(walk_settings["speed_ramp_s"]))
+                accepted_speed = (float(np.linalg.norm(openshc_last_response["accepted_velocity_xy_m_s"]))
+                                  if walk_backend == "openshc" and openshc_last_response is not None else float("nan"))
                 gait_row = {"gait_started": 1, "gait_elapsed_s": gait_elapsed,
                             "gait_cycle_phase": gait_state["cycle_phase"], "commanded_speed_m_s": commanded_speed,
+                            "openshc_requested_speed_m_s": commanded_speed if walk_backend == "openshc" else "",
+                            "openshc_accepted_speed_m_s": accepted_speed if walk_backend == "openshc" else "",
+                            "openshc_control_tick": openshc_last_response["tick"] if walk_backend == "openshc" and openshc_last_response else "",
+                            "openshc_completed_cycles": cycle_index if walk_backend == "openshc" else "",
                             "achieved_forward_speed_m_s": float(np.dot(vel, walk_forward)),
+                            "estimated_forward_speed_m_s": float(np.dot(estimated_body_velocity, walk_forward)),
                             "planned_body_x_m": planned_body[0], "planned_body_y_m": planned_body[1],
                             "planned_body_z_m": planned_body[2], "body_tracking_error_m": tracking_error,
-                            "planned_support_contact_count": valid_support_count,
+                            "planned_support_contact_count": truth_valid_support_count,
+                            "estimated_planned_support_contact_count": estimated_valid_support_count,
+                            "confirmed_support_count": support_guard_count,
                             "stance_slip_count": sum(value > float(walk_settings["max_stance_slip_m"]) for value in slip_by_leg.values()),
-                            "max_stance_slip_m": max_slip, "max_ik_residual_m": max_ik}
+                            "max_stance_slip_m": max_slip, "max_ik_residual_m": max_ik,
+                            "body_compensation_enabled": int(compensation_enabled),
+                            "body_compensation_roll_rad": gait_state.get("body_compensation", {}).get("roll_rad", 0.0),
+                            "body_compensation_pitch_rad": gait_state.get("body_compensation", {}).get("pitch_rad", 0.0),
+                            "body_compensation_height_m": gait_state.get("body_compensation", {}).get("height_m", 0.0)}
                 for leg in LEG_ORDER:
                     for axis, value in zip("xyz", desired_feet[leg]):
                         gait_row["desired_foot_{}_{}_m".format(leg, axis)] = value
                     for axis, value in zip("xyz", anchors[leg]):
                         gait_row["anchor_{}_{}_m".format(leg, axis)] = value
                     gait_row["planned_support_" + leg] = int(bool(planned_support[leg]))
-                    gait_row["measured_contact_" + leg] = int(foot_contacts[leg])
+                    gait_row["confirmed_contact_" + leg] = int(controller_contacts[leg])
+                    if proprioceptive_state is not None:
+                        gait_row["contact_estimated_up_force_{}_n".format(leg)] = proprioceptive_state["filtered_up_force_n"][leg]
                     gait_row["stance_slip_{}_m".format(leg)] = slip_by_leg[leg]
                     gait_row["ik_residual_{}_m".format(leg)] = current_ik_residuals[leg]
+                    if walk_backend == "openshc":
+                        native_leg = gait_state["legs"][leg]
+                        gait_row["openshc_phase_" + leg] = native_leg["phase"]
+                        gait_row["openshc_state_" + leg] = native_leg["state"]
+                        gait_row["openshc_phase_progress_" + leg] = native_leg["phase_progress"]
+                        for axis, value in zip("xyz", native_leg["foot_target_odom_m"]):
+                            gait_row["openshc_foot_target_{}_{}_m".format(leg, axis)] = value
+                        for index, joint in enumerate(("thigh", "knee", "ankle")):
+                            gait_row["openshc_q_target_j_{}_{}_rad".format(leg, joint)] = native_leg["q_target_rad"][index]
+                            gait_row["openshc_dq_target_j_{}_{}_rad_s".format(leg, joint)] = native_leg["dq_target_rad_s"][index]
+                            gait_row["openshc_velocity_limit_j_{}_{}".format(leg, joint)] = int(native_leg["joint_velocity_limit_active"][index])
+                            gait_row["openshc_position_limit_j_{}_{}".format(leg, joint)] = int(native_leg["joint_position_limit_active"][index])
+                        gait_row["openshc_ik_quality_" + leg] = native_leg["ik_quality"]
                 walk_samples += 1
                 saturation_samples += int(np.count_nonzero(saturated))
                 q_error = qref.astype(float) - q
@@ -646,9 +1105,27 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
                    "torque_saturated_count": int(np.count_nonzero(saturated)),
                    "control_update": int(control_update), "control_tick_index": control_tick_index,
                    "actuator_update": int(mode == "walk"), "toe_fk_error_max_m": toe_fk_error_max}
+            if proprioceptive_state is not None:
+                row.update({"estimated_body_x_m": controller_xyz[0], "estimated_body_y_m": controller_xyz[1],
+                            "estimated_body_z_m": controller_xyz[2],
+                            "estimated_vx_m_s": estimated_body_velocity[0],
+                            "estimated_vy_m_s": estimated_body_velocity[1],
+                            "estimated_vz_m_s": estimated_body_velocity[2],
+                            "estimated_support_count": proprioceptive_state["support_count"],
+                            "ideal_imu_roll_rad": controller_roll, "ideal_imu_pitch_rad": controller_pitch})
+                for leg in LEG_ORDER:
+                    row["estimated_contact_" + leg] = int(controller_contacts[leg])
+                    row["estimated_filtered_up_force_{}_n".format(leg)] = proprioceptive_state["filtered_up_force_n"][leg]
+                    for axis, value in zip("xyz", proprioceptive_state["force_world_n"][leg]):
+                        row["estimated_force_{}_{}_n".format(leg, axis)] = value
+                    for axis, value in zip("xyz", controller_feet_world[leg]):
+                        row["estimated_foot_{}_{}_m".format(leg, axis)] = value
+            row.update({"body_contact_force_{}_n".format(axis): contact_np[root_body_sim_index, index]
+                        for index, axis in enumerate("xyz")})
             for i, n in enumerate(sim_dof_names):
                 row["q_" + n], row["dq_" + n], row["tau_" + n], row["qref_" + n] = q[i], dq[i], tau[i], qref[i]
                 if mode == "walk":
+                    row["dq_feedback_" + n] = dq_feedback[i]
                     row["qref_delayed_" + n] = actuator_sample["delayed_position_rad"][i]
                     row["dqref_command_" + n] = actuator_sample["desired_velocity_rad_s"][i]
                     row["dqref_delayed_" + n] = actuator_sample["delayed_velocity_rad_s"][i]
@@ -660,13 +1137,15 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
                     row["actuator_saturated_" + n] = int(actuator_sample["torque_saturated"][i])
             if mode == "walk":
                 for leg in LEG_ORDER:
+                    for axis, value in zip("xyz", contact_np[toe_body_indices[leg]]):
+                        row["contact_force_{}_{}_n".format(leg, axis)] = value
                     for axis, value in zip("xyz", measured_feet_world[leg]):
                         row["actual_foot_{}_{}_m".format(leg, axis)] = value
                     for axis, value in zip("xyz", fk_feet_world.get(leg, (float("nan"),) * 3)):
                         row["fk_foot_{}_{}_m".format(leg, axis)] = value
                     row["toe_fk_error_{}_m".format(leg)] = toe_fk_error[leg]
                     row["measured_contact_" + leg] = int(foot_contacts[leg])
-                if gait is None or gait_state is None:
+                if gait_state is None:
                     row["gait_started"] = 0
                 row.update(gait_row)
             writer.writerow(row)
@@ -682,11 +1161,19 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
                                    "toe_fk_estimate_world_position_m": {leg: point.tolist() for leg, point in fk_feet_world.items()},
                                    "toe_fk_error_m": toe_fk_error}
             status["last_measured_state"] = last_measured_state
-            checks = {"contacts": contact_count >= int(gate["min_contacts"]),
-                          "roll_pitch": max(abs(roll), abs(pitch)) <= float(gate["max_abs_roll_pitch_rad"]),
-                          "linear_speed": linear_speed <= float(gate["max_linear_speed_m_s"]),
-                          "angular_speed": angular_speed <= float(gate["max_angular_speed_rad_s"]),
-                          "vertical_speed": abs(vel[2]) <= float(gate["max_abs_vertical_speed_m_s"]),
+            if proprioceptive_state is not None:
+                status["last_proprioceptive_state"] = {
+                    "estimated_body_xyz_m": controller_xyz.tolist(),
+                    "ideal_imu_quaternion_xyzw": controller_quat.tolist(),
+                    "confirmed_contact": dict(controller_contacts),
+                    "confirmed_support": dict(proprioceptive_state["support_mask"]),
+                    "filtered_up_force_n": dict(proprioceptive_state["filtered_up_force_n"]),
+                    "support_count": proprioceptive_state["support_count"]}
+            checks = {"contacts": controller_contact_count >= int(gate["min_contacts"]),
+                          "roll_pitch": max(abs(controller_roll), abs(controller_pitch)) <= float(gate["max_abs_roll_pitch_rad"]),
+                          "linear_speed": controller_linear_speed <= float(gate["max_linear_speed_m_s"]),
+                          "angular_speed": controller_angular_speed <= float(gate["max_angular_speed_rad_s"]),
+                          "vertical_speed": abs(estimated_body_velocity[2]) <= float(gate["max_abs_vertical_speed_m_s"]),
                           "joint_position": not pos_bad, "joint_velocity": not vel_bad,
                           "torque_saturation": not np.any(saturated)}
             if t >= float(gate["eligible_after_s"]):
@@ -703,16 +1190,53 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
                         walk_start_verified_at = t
                         status["stand_gate_verified_at_s"] = t
                         if not stand_only:
-                            yaw0 = _orientation_to_rpy(quat)[2]
-                            rotation_yaw = np.array([[math.cos(yaw0), -math.sin(yaw0), 0.0],
-                                                    [math.sin(yaw0), math.cos(yaw0), 0.0], [0.0, 0.0, 1.0]])
-                            nominal_feet = {leg: rotation_yaw.T @ (measured_feet_world[leg] - xyz)
-                                            for leg in LEG_ORDER}
-                            gait, gait_state = create_gait_after_stand_gate(
-                                stand_start_verified, nominal_feet, measured_feet_world, xyz, yaw0,
-                                walk_settings, foot_contacts)
+                            yaw0 = controller_yaw
+                            if walk_backend == "openshc":
+                                openshc_start_xyz = xyz.copy()
+                                openshc_start_yaw = yaw0
+                                openshc_anchor_world = {leg: measured_feet_world[leg].copy() for leg in LEG_ORDER}
+                                q_measured = {name: float(q[index]) for index, name in enumerate(sim_dof_names)}
+                                openshc_bridge = OpenShcBridge(
+                                    openshc_executable, model, q_measured, measured_feet_world, xyz, quat,
+                                    walk_settings, out / "openshc_stderr.log")
+                                status["openshc_initialization"] = openshc_bridge.initialization
+                                status["openshc_requested_frequency_hz"] = float(walk_settings["frequency_hz"])
+                                status["openshc_requested_duty_factor"] = float(walk_settings["duty_factor"])
+                                status["openshc_native_frequency_parameter_hz"] = (
+                                    float(walk_settings["frequency_hz"]) / float(walk_settings["duty_factor"]))
+                                status["openshc_effective_cycle_frequency_hz"] = (
+                                    openshc_bridge.initialization["effective_frequency_hz"])
+                                status["openshc_workspace_forward_speed_limit_m_s"] = (
+                                    openshc_bridge.initialization["forward_speed_limit_m_s"])
+                                status["openshc_speed_limit_source"] = "native walk workspace from local URDF joint limits"
+                                status["openshc_pose_feedback_enabled"] = False
+                                status["openshc_admittance_enabled"] = False
+                                status["openshc_autopose_enabled"] = False
+                            else:
+                                rotation_yaw = np.array([[math.cos(yaw0), -math.sin(yaw0), 0.0],
+                                                        [math.sin(yaw0), math.cos(yaw0), 0.0], [0.0, 0.0, 1.0]])
+                                nominal_feet = {leg: rotation_yaw.T @ (controller_feet_world[leg] - controller_xyz)
+                                                for leg in LEG_ORDER}
+                                gait_settings_for_trial = walk_settings
+                                if proprioceptive is not None:
+                                    gait_settings_for_trial = dict(
+                                        walk_settings,
+                                        terrain_adaptation=dict(walk_settings["terrain_adaptation"],
+                                                                toe_radius_m=model.toe_radius_m))
+                                gait, gait_state = create_gait_after_stand_gate(
+                                    stand_start_verified, nominal_feet, controller_feet_world, controller_xyz, yaw0,
+                                    gait_settings_for_trial, controller_contacts)
+                                if proprioceptive is not None:
+                                    proprioceptive.set_support_mask(gait_state["confirmed_support"],
+                                                                    controller_feet_world)
+                                    proprioceptive_state = proprioceptive.snapshot()
+                                    controller_xyz = proprioceptive_state["body_xyz_m"].copy()
+                                    controller_feet_world = {leg: value.copy() for leg, value in
+                                                             proprioceptive_state["feet_world_m"].items()}
+                                    controller_contacts = dict(proprioceptive_state["contact_confirmed"])
                             gait_start_time = t
-                            initial_walk_xyz = xyz.copy()
+                            initial_walk_xyz = controller_xyz.copy()
+                            initial_walk_truth_xyz = xyz.copy()
                             walk_forward = np.array([-math.sin(yaw0), math.cos(yaw0), 0.0])
                             walk_started = True
                             status["gait_started"] = True
@@ -742,7 +1266,7 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
                 failure = "joint_velocity_limit"
             elif max(abs(roll), abs(pitch)) > float(gate["max_tilt_rad"]):
                 failure = "tilt_limit"
-            elif xyz[2] < float(initial["base_z_min_m"]):
+            elif controller_xyz[2] < float(initial["base_z_min_m"]):
                 failure = "base_height_limit"
             if failure:
                 stand_window.reset()
@@ -754,23 +1278,71 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
                     interrupted_by_viewer = True
                     stable = False
                     break
-                gym.step_graphics(sim)
-                gym.draw_viewer(viewer, sim, True)
-                gym.sync_frame_time(sim)
+                if cadence.is_tick(step):
+                    gym.step_graphics(sim)
+                    gym.draw_viewer(viewer, sim, True)
+                    gym.sync_frame_time(sim)
+        if mode == "walk" and failure == "joint_velocity_limit" and last_measured_state is not None:
+            violations = np.flatnonzero(np.abs(dq) > max_velocity + float(control["velocity_tolerance_rad_s"]))
+            joints = {joint.name: joint for joint in model.joints}
+            velocity_diagnostic = {}
+            for index in violations:
+                name = sim_dof_names[int(index)]
+                joint = joints[name]
+                parent_index = int(body_dict[joint.parent])
+                child_index = int(body_dict[joint.child])
+                child_quat = rb["pose"][child_index]["r"]
+                child_quaternion = np.array([child_quat[key] for key in ("x", "y", "z", "w")], dtype=float)
+                axis = joint.axis / np.linalg.norm(joint.axis)
+                axis_world = quaternion_matrix_xyzw(child_quaternion) @ axis
+                parent_omega = np.array([rb["vel"][parent_index]["angular"][key]
+                                         for key in ("x", "y", "z")], dtype=float)
+                child_omega = np.array([rb["vel"][child_index]["angular"][key]
+                                        for key in ("x", "y", "z")], dtype=float)
+                velocity_diagnostic[name] = {
+                    "raw_gym_dq_rad_s": float(dq[index]),
+                    "q_finite_difference_rad_s": float((q[index] - q_before_physics[index]) / dt),
+                    "encoder_difference_feedback_input_rad_s": float(dq_encoder[index]),
+                    "actuator_feedback_input_rad_s": float(dq_feedback[index]),
+                    "parent_child_angular_velocity_projection_rad_s": float(np.dot(child_omega - parent_omega, axis_world)),
+                    "q_rad": float(q[index]),
+                    "qref_rad": float(qref[index]),
+                    "contact_force_child_body_n": [float(contact_np[body_dict[joint.child]][key])
+                                                    for key in range(3)],
+                }
+            status["joint_velocity_failure_diagnostic"] = velocity_diagnostic
         status["gate_rejection_counts"] = criteria
         status["gate_window_s"] = float(gate["window_s"])
         status["stable_gate_passed"] = (stable if stand_only else stand_start_verified) if mode == "walk" else stable
         status["control_tick_count"] = control_tick_count
+        status["qref_rate_clamp_count"] = qref_rate_clamped_samples
+        status["qref_rate_reference_sample_count"] = qref_rate_reference_samples
+        status["qref_rate_clamp_fraction"] = (
+            qref_rate_clamped_samples / qref_rate_reference_samples
+            if qref_rate_reference_samples else 0.0)
         status["toe_fk_error_max_observed_m"] = toe_fk_error_max_observed
+        status["max_abs_roll_pitch_observed_rad"] = max_abs_roll_pitch_observed
+        status["simulator_body_z_range_m"] = ([body_z_min_observed, body_z_max_observed]
+                                                if math.isfinite(body_z_min_observed) else None)
+        status["max_root_body_contact_force_n"] = max_root_contact_force_n
+        status["terrain"] = terrain_metadata
         if mode == "walk":
             saturation_fraction = (float(saturation_samples) / (walk_samples * len(sim_dof_names))) if walk_samples else 0.0
+            simulator_truth_net_displacement = (float(np.dot(xyz - initial_walk_truth_xyz, walk_forward))
+                                                if walk_started and last_measured_state else 0.0)
+            estimated_net_displacement = (float(np.dot(controller_xyz - initial_walk_xyz, walk_forward))
+                                          if walk_started and last_measured_state else 0.0)
             status.update({"gait_started": walk_started, "completed_gait_cycles": last_cycle_index,
                            "cycle_forward_displacement_m": cycle_progress,
                            "mean_completed_cycle_displacement_m": float(np.mean(cycle_progress)) if cycle_progress else None,
-                           "net_forward_displacement_m": (float(np.dot(xyz - initial_walk_xyz, walk_forward))
-                                                           if walk_started and last_measured_state else 0.0),
+                           "net_forward_displacement_m": simulator_truth_net_displacement,
+                           "estimated_net_forward_displacement_m": estimated_net_displacement,
+                           "estimated_cycle_forward_displacement_m": estimated_cycle_progress,
                            "planned_support_contact_fraction": (support_contact_samples / planned_support_samples
                                                                 if planned_support_samples else None),
+                           "estimated_planned_support_contact_fraction": (
+                               estimated_support_contact_samples / planned_support_samples
+                               if planned_support_samples else None),
                            "stance_slip_threshold_sample_count": slip_samples, "stance_slip_event_count": slip_events,
                            "max_body_tracking_error_m": tracking_error_max,
                            "joint_position_error_rmse_rad": math.sqrt(q_error_sq_sum / q_error_values) if q_error_values else None,
@@ -791,7 +1363,7 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
                 failure = "minimum_cycles_not_reached"
             elif progress_failure := walk_progress_failure(
                     cycle_progress,
-                    float(np.dot(xyz - initial_walk_xyz, walk_forward)) if walk_started and last_measured_state else 0.0,
+                    simulator_truth_net_displacement,
                     int(walk_settings["minimum_cycles"]),
                     float(walk_settings["minimum_net_forward_displacement_m"]),
                     float(walk_settings["minimum_completed_cycle_displacement_m"])):
@@ -836,6 +1408,8 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
     finally:
         if csv_file:
             csv_file.close()
+        if openshc_bridge is not None:
+            openshc_bridge.close()
         if out.exists():
             status_path.write_text(json.dumps(_json_safe(status), indent=2, allow_nan=False) + "\n")
         if gym is not None and viewer is not None:
