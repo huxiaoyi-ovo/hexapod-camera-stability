@@ -90,6 +90,19 @@ class StandaloneHexapodTests(unittest.TestCase):
         self.assertNotIn("legged_gym", serialized)
         self.assertIs(self.config["asset_import"]["flip_visual_attachments"], True)
 
+    def test_stop_on_violation_defaults_strict_and_requires_boolean(self):
+        self.assertIs(self.config["stop_on_violation"], True)
+        config = copy.deepcopy(self.config)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            config["stop_on_violation"] = False
+            path.write_text(json.dumps(config))
+            self.assertIs(load_config(path)["stop_on_violation"], False)
+            config["stop_on_violation"] = "false"
+            path.write_text(json.dumps(config))
+            with self.assertRaisesRegex(ValueError, "stop_on_violation"):
+                load_config(path)
+
     def test_openshc_profile_uses_exact_upper_and_physics_cadence(self):
         config = load_config(PROJECT_ROOT / "configs/flat_walk_openshc.json")
         self.assertEqual(config["walk_controller"], "openshc")

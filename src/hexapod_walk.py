@@ -10,6 +10,7 @@ from hexapod_robot import JOINT_TYPES, LEG_ORDER, RobotModel
 
 TRIPOD_A = ("lb", "lf", "rm")
 TRIPOD_B = ("lm", "rb", "rf")
+_CENTERED_VELOCITY_BLEND_TIME_S = 0.02
 
 
 class ControlCadence:
@@ -138,7 +139,7 @@ def leg_fk_jacobian(model: RobotModel, leg: str,
 
 def leg_inverse_kinematics(model: RobotModel, leg: str, target_base_m: np.ndarray,
                            seed_by_name: Mapping[str, float], tolerance_m: float = 2e-5,
-                           max_iterations: int = 80) -> Tuple[Dict[str, float], float]:
+                           max_iterations: int = 80, allow_approximate: bool = False) -> Tuple[Dict[str, float], float]:
     """Solve bounded damped least-squares IK; reject unreachable/limit targets."""
     target = np.asarray(target_base_m, dtype=float)
     if target.shape != (3,) or not np.all(np.isfinite(target)):
@@ -148,7 +149,10 @@ def leg_inverse_kinematics(model: RobotModel, leg: str, target_base_m: np.ndarra
     lower = np.array([model.limits[name].lower_rad for name in names], dtype=float)
     upper = np.array([model.limits[name].upper_rad for name in names], dtype=float)
     if np.any(q < lower) or np.any(q > upper):
-        raise ValueError("IK seed violates URDF joint limits")
+        if allow_approximate and np.all(np.isfinite(q)):
+            q = np.clip(q, lower, upper)
+        else:
+            raise ValueError("IK seed violates URDF joint limits")
     damping = 0.015
     for _ in range(max_iterations):
         q_named = dict(seed_by_name)
@@ -180,8 +184,10 @@ def leg_inverse_kinematics(model: RobotModel, leg: str, target_base_m: np.ndarra
     q_named.update(zip(names, q))
     position, _ = leg_fk_jacobian(model, leg, q_named)
     residual = float(np.linalg.norm(target - position))
-    if residual > tolerance_m:
+    if residual > tolerance_m and not allow_approximate:
         raise ValueError("{} IK target is unreachable within joint limits (residual {:.6f} m)".format(leg, residual))
+    if not np.all(np.isfinite(q)) or not math.isfinite(residual):
+        raise ValueError("{} IK produced a nonfinite solution".format(leg))
     return dict(zip(names, map(float, q))), residual
 
 
@@ -206,6 +212,25 @@ def feet_world(model: RobotModel, q_by_name: Mapping[str, float], body_xyz_m: np
 def _smoothstep(value: float) -> float:
     value = min(1.0, max(0.0, float(value)))
     return value * value * value * (10.0 + value * (-15.0 + 6.0 * value))
+
+
+def _velocity_profile_blend_fraction(swing_duration_s: float) -> float:
+    edge = _CENTERED_VELOCITY_BLEND_TIME_S / float(swing_duration_s)
+    if not 0.0 < edge < 0.5:
+        raise ValueError("centered_velocity requires swing edge blends shorter than half the swing")
+    return edge
+
+
+def _velocity_plateau_progress(value: float, edge: float) -> Tuple[float, float]:
+    """Return normalized swing progress and its phase derivative."""
+    phase = min(1.0, max(0.0, float(value)))
+    if phase < edge:
+        r = phase / edge
+        return edge / (1.0 - edge) * (r**3 - 0.5 * r**4), (3.0 * r**2 - 2.0 * r**3) / (1.0 - edge)
+    if phase <= 1.0 - edge:
+        return (phase - 0.5 * edge) / (1.0 - edge), 1.0 / (1.0 - edge)
+    r = (1.0 - phase) / edge
+    return 1.0 - edge / (1.0 - edge) * (r**3 - 0.5 * r**4), (3.0 * r**2 - 2.0 * r**3) / (1.0 - edge)
 
 
 def _split_phase(unwrapped_phase: float) -> Tuple[int, float]:
@@ -236,10 +261,18 @@ class TripodGait:
         self.ramp_s = float(settings["speed_ramp_s"])
         self.touchdown_timeout_s = float(settings["touchdown_timeout_s"])
         self.max_slip_m = float(settings["max_stance_slip_m"])
+        self.trajectory_profile = settings.get("trajectory_profile", "legacy")
+        self.stop_on_violation = settings.get("stop_on_violation", True)
+        if type(self.stop_on_violation) is not bool:
+            raise ValueError("stop_on_violation must be a boolean")
+        self._reported_timeouts = set()
+        if self.trajectory_profile not in ("legacy", "centered_velocity"):
+            raise ValueError("trajectory_profile must be legacy or centered_velocity")
         self.stance = {leg: True for leg in LEG_ORDER}
         self.swing_start: Dict[str, np.ndarray] = {}
         self.swing_end: Dict[str, np.ndarray] = {}
         self.swing_started: Dict[str, float] = {}
+        self.swing_blend_fraction: Dict[str, float] = {}
         self.pending_touchdown_since: Dict[str, float] = {}
         self.release_seen = {leg: False for leg in LEG_ORDER}
         self.last_phase = 0.0
@@ -260,6 +293,19 @@ class TripodGait:
         result += forward * distance
         result[2] += self._terrain_body_z_offset_m
         return result
+
+    def _touchdown_world_target(self, touchdown_time_s: float, leg: str) -> np.ndarray:
+        body = self.body_reference(touchdown_time_s)
+        target = body + self._rotate_nominal(self.nominal_feet_base[leg])
+        if self.trajectory_profile == "centered_velocity":
+            stance_end = self.body_reference(touchdown_time_s + self.duty / self.frequency)
+            target[:2] += 0.5 * (stance_end[:2] - body[:2])
+        return target
+
+    def _swing_progress(self, leg: str, phase_progress: float) -> float:
+        if self.trajectory_profile == "centered_velocity":
+            return _velocity_plateau_progress(phase_progress, self.swing_blend_fraction[leg])[0]
+        return _smoothstep(phase_progress)
 
     def phase_for_leg(self, leg: str, elapsed_s: float) -> float:
         offset = 0.0 if leg in TRIPOD_A else 0.5
@@ -287,6 +333,7 @@ class TripodGait:
 
     def update(self, elapsed_s: float, actual_feet_world: Mapping[str, np.ndarray],
                contacts: Mapping[str, bool]) -> Dict[str, object]:
+        self._current_violations = []
         if self.terrain_adaptation:
             return self._update_terrain_adaptive(elapsed_s, actual_feet_world, contacts)
         unwrapped_phase = self._advance_phase(elapsed_s)
@@ -302,8 +349,10 @@ class TripodGait:
                 self.swing_start[leg] = self.anchors[leg].copy()
                 self.swing_started[leg] = float(elapsed_s)
                 swing_duration = (1.0 - self.duty) / self.frequency
+                if self.trajectory_profile == "centered_velocity":
+                    self.swing_blend_fraction[leg] = _velocity_profile_blend_fraction(swing_duration)
                 touchdown_time = elapsed_s + max(0.0, swing_duration * (1.0 - (phase - self.duty) / (1.0 - self.duty)))
-                self.swing_end[leg] = self.body_reference(touchdown_time) + self._rotate_nominal(self.nominal_feet_base[leg])
+                self.swing_end[leg] = self._touchdown_world_target(touchdown_time, leg)
             elif not self.stance[leg] and should_stance:
                 self.stance[leg] = True
                 if contacts.get(leg, False):
@@ -317,14 +366,14 @@ class TripodGait:
                     self.anchors[leg] = np.asarray(actual_feet_world[leg], dtype=float).copy()
                     del self.pending_touchdown_since[leg]
                 elif elapsed_s - self.pending_touchdown_since[leg] > self.touchdown_timeout_s:
-                    raise RuntimeError("{} failed to establish contact at touchdown".format(leg))
+                    self._timeout("touchdown_timeout", leg, "failed to establish contact at touchdown")
             planned_support[leg] = bool(self.stance[leg])
             if self.stance[leg]:
                 desired[leg] = self.anchors[leg].copy()
             else:
                 swing_duration = (1.0 - self.duty) / self.frequency
                 progress = (phase - self.duty) / (1.0 - self.duty)
-                smooth = _smoothstep(progress)
+                smooth = self._swing_progress(leg, progress)
                 point = self.swing_start[leg] + smooth * (self.swing_end[leg] - self.swing_start[leg])
                 point = point.copy()
                 point[2] += self.clearance * 16.0 * progress*progress*(1.0-progress)*(1.0-progress)
@@ -334,7 +383,7 @@ class TripodGait:
         return {"desired_feet_world": desired, "anchors_world": {leg: value.copy() for leg, value in self.anchors.items()},
                 "planned_support": planned_support, "phase_by_leg": phases, "cycle_phase": cycle_phase,
                 "planned_body_xyz_m": self.body_reference(elapsed_s), "pending_touchdown_s": pending,
-                "completed_cycles": cycle}
+                "completed_cycles": cycle, "violations": list(self._current_violations)}
 
     def _update_terrain_adaptive(self, elapsed_s: float, actual_feet_world: Mapping[str, np.ndarray],
                                  contacts: Mapping[str, bool]) -> Dict[str, object]:
@@ -370,14 +419,15 @@ class TripodGait:
                         self.swing_start[leg] = self.anchors[leg].copy()
                         self.swing_started[leg] = elapsed
                         swing_duration = (1.0 - self.duty) / self.frequency
+                        if self.trajectory_profile == "centered_velocity":
+                            self.swing_blend_fraction[leg] = _velocity_profile_blend_fraction(swing_duration)
                         touchdown_time = elapsed + max(0.0, swing_duration *
                             (1.0 - (phase - self.duty) / (1.0 - self.duty)))
-                        self.swing_end[leg] = (self.body_reference(touchdown_time) +
-                                               self._rotate_nominal(self.nominal_feet_base[leg]))
+                        self.swing_end[leg] = self._touchdown_world_target(touchdown_time, leg)
                     else:
                         self.pending_liftoff_since.setdefault(leg, elapsed)
                         if elapsed - self.pending_liftoff_since[leg] > float(settings["liftoff_timeout_s"]):
-                            raise RuntimeError("{} could not lift without confirmed opposite-tripod support".format(leg))
+                            self._timeout("liftoff_timeout", leg, "could not lift without confirmed opposite-tripod support")
 
             if not self.stance[leg]:
                 swing_progress = (phase - self.duty) / (1.0 - self.duty) if not should_stance else 1.0
@@ -400,7 +450,7 @@ class TripodGait:
                 elif should_stance:
                     self.pending_touchdown_since.setdefault(leg, elapsed)
                     if elapsed - self.pending_touchdown_since[leg] > float(settings["probe_timeout_s"]):
-                        raise RuntimeError("{} exceeded bounded touchdown probe time".format(leg))
+                        self._timeout("probe_timeout", leg, "exceeded bounded touchdown probe time")
 
             if self.stance[leg]:
                 planned_support[leg] = bool(self.confirmed_support[leg])
@@ -408,7 +458,7 @@ class TripodGait:
             else:
                 swing_progress = (phase - self.duty) / (1.0 - self.duty) if not should_stance else 1.0
                 swing_progress = min(1.0, max(0.0, swing_progress))
-                smooth = _smoothstep(swing_progress)
+                smooth = self._swing_progress(leg, swing_progress)
                 point = self.swing_start[leg] + smooth * (self.swing_end[leg] - self.swing_start[leg])
                 point = point.copy()
                 point[2] += self.clearance * 16.0 * swing_progress*swing_progress*(1.0-swing_progress)*(1.0-swing_progress)
@@ -437,7 +487,19 @@ class TripodGait:
                 "pending_liftoff_s": {leg: elapsed - started
                                        for leg, started in self.pending_liftoff_since.items()},
                 "release_seen": dict(self.release_seen),
-                "completed_cycles": completed_cycles}
+                "completed_cycles": completed_cycles, "violations": list(self._current_violations)}
+
+    def _timeout(self, category: str, leg: str, message: str) -> None:
+        label = "{}_{}".format(category, leg)
+        if self.stop_on_violation:
+            if category == "touchdown_timeout":
+                raise RuntimeError("{} {}".format(leg, message))
+            if category == "liftoff_timeout":
+                raise RuntimeError("{} {}".format(leg, message))
+            raise RuntimeError("{} {}".format(leg, message))
+        if label not in self._reported_timeouts:
+            self._reported_timeouts.add(label)
+            self._current_violations.append(label)
 
     def _rotate_nominal(self, vector: np.ndarray) -> np.ndarray:
         c, s = math.cos(self.yaw), math.sin(self.yaw)

@@ -30,7 +30,8 @@ def main():
     status = out / "status.json"
     if status.exists():
         status_data = json.loads(status.read_text())
-        return 0 if status_data.get("status") in ("settled", "stand_verified", "walk_completed") else 2
+        return 0 if status_data.get("status") in (
+            "settled", "stand_verified", "walk_completed", "completed_with_violations") else 2
     return 2
 
 

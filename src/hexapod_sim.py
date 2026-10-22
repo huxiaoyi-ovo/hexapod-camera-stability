@@ -30,18 +30,25 @@ from hexapod_terrain import build_terrain
 from hexapod_walk import (ControlCadence, StandStartGate, TripodGait, create_gait_after_stand_gate, feet_world,
                           leg_fk_jacobian, leg_inverse_kinematics, quaternion_matrix_xyzw,
                           walk_progress_failure)
+from hexapod_pcr_expert import PcrExpertAdapter, pcr_default_joint_angles
 
 
 def _hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _runtime_provenance(project_root: Path) -> Dict[str, Any]:
+def _runtime_provenance(project_root: Path, include_camera: bool = False,
+                        include_pcr_expert: bool = False) -> Dict[str, Any]:
     """Describe the exact independent Python runtime inputs for this run."""
     runtime_files = ("src/hexapod_sim.py", "src/hexapod_robot.py", "scripts/run_hexapod_pilot.py",
                      "src/hexapod_walk.py", "src/hexapod_actuator.py", "src/hexapod_openshc.py",
                      "src/hexapod_sensing.py", "src/hexapod_terrain.py",
                      "src/hexapod_body_compensation.py")
+    if include_camera:
+        runtime_files += ("src/hexapod_camera_compensation.py", "src/controller.py")
+    if include_pcr_expert:
+        runtime_files += ("src/hexapod_pcr_expert.py", "third_party/pcr_expert/expert.py",
+                          "third_party/pcr_expert/kinematic.py", "third_party/pcr_expert/provenance.json")
     hashes = {relative: _hash(project_root / relative) for relative in runtime_files}
     try:
         revision = subprocess.run(
@@ -131,6 +138,9 @@ def _mark_initialization_stage(status_path: Path, status: Dict[str, Any], stage:
 def load_config(path: Union[str, Path]) -> Dict[str, Any]:
     config_path = Path(path).resolve()
     config = json.loads(config_path.read_text())
+    config.setdefault("stop_on_violation", True)
+    if type(config["stop_on_violation"]) is not bool:
+        raise ValueError("stop_on_violation must be a boolean")
     required = ("robot_urdf", "asset_import", "stand_reference_rad", "physics", "control", "gate", "duration_s")
     missing = [key for key in required if key not in config]
     if missing:
@@ -213,12 +223,36 @@ def load_config(path: Union[str, Path]) -> Dict[str, Any]:
             raise ValueError("terrain adaptation speeds, limits, and timeouts must be positive")
     compensation = config.get("body_compensation")
     if compensation is not None:
-        if (not isinstance(compensation, dict) or set(compensation) != {"enabled"} or
-                type(compensation["enabled"]) is not bool):
-            raise ValueError("body_compensation must explicitly contain only a boolean enabled flag")
+        if (not isinstance(compensation, dict) or set(compensation) - {"enabled", "kind"} or
+                type(compensation.get("enabled")) is not bool or
+                compensation.get("kind", "pose_pd") not in ("pose_pd", "pose_p", "camera_space")):
+            raise ValueError("body_compensation requires a boolean enabled flag and supported kind")
         if (mode != "walk" or config.get("walk_controller", "python_tripod") != "python_tripod" or
                 sensing.get("kind") != "proprioceptive"):
             raise ValueError("body compensation is available only for the proprioceptive Python tripod profile")
+        if compensation.get("kind", "pose_pd") == "camera_space":
+            pilot = config.get("compensation_pilot")
+            if (not isinstance(pilot, dict) or not isinstance(pilot.get("camera"), dict) or
+                    set(pilot["camera"]) != {"base_to_camera_position_m", "base_to_camera_quaternion_xyzw",
+                                             "optical_axis_description", "interpretation"}):
+                raise ValueError("camera_space compensation requires explicit camera extrinsics and interpretation")
+            template = pilot.get("camera_scene_template")
+            if not isinstance(template, str) or not template:
+                raise ValueError("camera_space compensation requires compensation_pilot.camera_scene_template")
+            try:
+                camera_spec = json.loads((PROJECT_ROOT / template).resolve().read_text())
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ValueError("camera-space scene template is unavailable or malformed") from exc
+            if set(camera_spec) != {"camera", "scene", "note"}:
+                raise ValueError("camera-space scene template must define camera and scene")
+            camera_extrinsics = pilot["camera"]
+            position = camera_extrinsics.get("base_to_camera_position_m")
+            quaternion = camera_extrinsics.get("base_to_camera_quaternion_xyzw")
+            if (not isinstance(position, list) or len(position) != 3 or
+                    not isinstance(quaternion, list) or len(quaternion) != 4 or
+                    any(type(value) not in (int, float) or not math.isfinite(float(value))
+                        for value in position + quaternion)):
+                raise ValueError("camera-space extrinsics must be finite 3- and 4-vectors")
     terrain_config = config.get("terrain", {"kind": "flat"})
     if not isinstance(terrain_config, dict):
         raise ValueError("terrain configuration must be an object")
@@ -230,8 +264,17 @@ def load_config(path: Union[str, Path]) -> Dict[str, Any]:
     cadence = ControlCadence(float(p["dt_s"]), float(control_period))
     if mode == "walk":
         walk_controller = config.get("walk_controller", "python_tripod")
-        if walk_controller not in ("python_tripod", "openshc"):
-            raise ValueError("walk_controller must be python_tripod or openshc")
+        if walk_controller not in ("python_tripod", "openshc", "pcr_expert"):
+            raise ValueError("walk_controller must be python_tripod, openshc, or pcr_expert")
+        if walk_controller == "pcr_expert":
+            pcr_settings = config.get("pcr_expert")
+            if (not isinstance(pcr_settings, dict) or
+                    set(pcr_settings) != {"link_lengths_m", "body_half_shape_m"} or
+                    pcr_settings["link_lengths_m"] != [0.072, 0.13, 0.17] or
+                    pcr_settings["body_half_shape_m"] != {"x": 0.1, "y": 0.22}):
+                raise ValueError("pcr_expert requires the frozen source geometry settings")
+            if sensing.get("kind") != "legacy_simulator" or compensation is not None:
+                raise ValueError("pcr_expert uses raw simulator joint state without compensation")
         if not math.isclose(float(p["dt_s"]), 0.0025, abs_tol=1e-12) or not math.isclose(float(control_period), 0.02, abs_tol=1e-12) or cadence.steps_per_update != 8:
             raise ValueError("walk mode requires 2.5 ms physics steps and an exact 20 ms control period")
         walk = config.get("walk")
@@ -314,13 +357,23 @@ def _orientation_to_rpy(quat: Iterable[float]):
     return roll, pitch, yaw
 
 
+def _pcr_reference_body_distance(elapsed_s: float, speed_m_s: float, ramp_s: float) -> float:
+    elapsed = max(0.0, float(elapsed_s))
+    ramp = float(ramp_s)
+    if elapsed < ramp:
+        return 0.5 * float(speed_m_s) * elapsed * elapsed / ramp
+    return float(speed_m_s) * (elapsed - 0.5 * ramp)
+
+
 def _walk_control_targets(model, gait: TripodGait, elapsed_s: float, q_by_name: Dict[str, float],
                           body_xyz: np.ndarray, body_quat: np.ndarray,
                           contacts: Dict[str, bool], seed_by_name: Dict[str, float],
                           measured_feet_world: Optional[Dict[str, np.ndarray]] = None,
                           body_compensator: Optional[BoundedBodyCompensator] = None,
+                          camera_compensator=None,
                           gyro_world_rad_s: Optional[np.ndarray] = None,
                           estimated_body_velocity_m_s: Optional[np.ndarray] = None,
+                          previous_applied_torque_by_name=None,
                           control_period_s: float = 0.02):
     actual_feet = measured_feet_world or feet_world(model, q_by_name, body_xyz, body_quat)
     state = gait.update(elapsed_s, actual_feet, contacts)
@@ -335,17 +388,52 @@ def _walk_control_targets(model, gait: TripodGait, elapsed_s: float, q_by_name: 
             float(planned_body[2]))
         body_position = planned_body + np.array([0.0, 0.0, corrections["height_m"]])
         body_rotation = body_reference_rotation(gait.yaw, corrections["roll_rad"], corrections["pitch_rad"])
+        camera_diagnostics = None
+    elif camera_compensator is not None:
+        ramp = min(1.0, max(0.0, elapsed_s / max(gait.ramp_s, 1e-9)))
+        nominal_speed = gait.speed * ramp
+        nominal_velocity_world = nominal_speed * np.array([-math.sin(gait.yaw), math.cos(gait.yaw), 0.0])
+        support = {leg: bool(state["confirmed_support"].get(leg, False) and
+                             state["planned_support"].get(leg, False)) for leg in LEG_ORDER}
+        camera_update_started = time.perf_counter()
+        correction_vector, camera_diagnostics = camera_compensator.update(
+            q_by_name=q_by_name, support=support, planned_body=planned_body, yaw=gait.yaw,
+            anchors=state["anchors_world"], estimated_xyz=body_xyz,
+            estimated_velocity=estimated_body_velocity_m_s,
+            imu_quaternion=body_quat, gyro_world=gyro_world_rad_s,
+            nominal_velocity_world=nominal_velocity_world,
+            previous_applied_torque_by_name=previous_applied_torque_by_name)
+        camera_diagnostics["compute_time_ms"] = (time.perf_counter() - camera_update_started) * 1000.0
+        corrections = {"roll_rad": float(correction_vector[0]),
+                       "pitch_rad": float(correction_vector[1]),
+                       "height_m": float(correction_vector[2])}
+        body_position = planned_body + np.array([0.0, 0.0, corrections["height_m"]])
+        body_rotation = body_reference_rotation(gait.yaw, corrections["roll_rad"], corrections["pitch_rad"])
     else:
         corrections = {"roll_rad": 0.0, "pitch_rad": 0.0, "height_m": 0.0}
+        camera_diagnostics = None
     state["body_compensation"] = corrections
+    state["camera_compensation_diagnostics"] = camera_diagnostics
     q_targets = dict(seed_by_name)
     residuals = {}
     for leg in LEG_ORDER:
         target_world = np.asarray(state["desired_feet_world"][leg], dtype=float)
         target_base = body_rotation.T @ (target_world - body_position)
-        solved, residuals[leg] = leg_inverse_kinematics(model, leg, target_base, q_targets)
+        solved, residuals[leg] = leg_inverse_kinematics(
+            model, leg, target_base, q_targets, allow_approximate=not gait.stop_on_violation)
         q_targets.update(solved)
     return q_targets, state, actual_feet, residuals
+
+
+def _record_violation(status: Dict[str, Any], category: str, time_s: float) -> None:
+    record = status.setdefault("walking_violations", {
+        "time_base": "simulation_seconds", "counts": {}, "first_time_s": {}, "last_time_s": {}})
+    counts = record["counts"]
+    counts[category] = int(counts.get(category, 0)) + 1
+    record["first_time_s"].setdefault(category, float(time_s))
+    record["last_time_s"][category] = float(time_s)
+    if counts[category] == 1:
+        print("walking_violation={} time_s={:.3f}".format(category, time_s), flush=True)
 
 
 def _openshc_gait_state(response: Dict[str, Any], bridge: OpenShcBridge,
@@ -423,9 +511,48 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
     control = config["control"]
     gate = config["gate"]
     walk_settings = config.get("walk", {})
+    stop_on_violation = config.get("stop_on_violation", True)
+    if mode == "walk":
+        walk_settings = dict(walk_settings, stop_on_violation=stop_on_violation)
     sensing_config = config.get("sensing", {"kind": "legacy_simulator"})
     sensing_mode = sensing_config.get("kind", "legacy_simulator")
-    compensation_enabled = bool(config.get("body_compensation", {}).get("enabled", False))
+    compensation_config = config.get("body_compensation", {"enabled": False})
+    compensation_enabled = bool(compensation_config.get("enabled", False))
+    compensation_kind = compensation_config.get("kind", "pose_pd")
+    camera_scene_path = None
+    camera_scene_spec = None
+    camera_compensation_settings = None
+    camera_mass_matrix = None
+    if compensation_enabled and compensation_kind == "camera_space":
+        camera_scene_path = (PROJECT_ROOT / config["compensation_pilot"]["camera_scene_template"]).resolve()
+        camera_scene_spec = json.loads(camera_scene_path.read_text())
+        from hexapod_camera_compensation import (SETTINGS as camera_compensation_settings,
+                                                 generalized_mass_matrix)
+        camera_mass_matrix = generalized_mass_matrix(model, qref_named)
+        effective_compensation_settings = {
+            **camera_compensation_settings,
+            "enabled": True,
+            "kind": "camera_space",
+            "configured_joint_pd_gains_nm": {
+                "kp_nm_rad": float(control["kp_nm_rad"]),
+                "kd_nm_s_rad": float(control["kd_nm_s_rad"])},
+            "configured_actuator_response": {
+                "command_delay_s": float(config["actuator"]["command_delay_s"]),
+                "torque_bandwidth_hz": float(config["actuator"]["torque_bandwidth_hz"])},
+            "pose_correction_bounds": {"roll_pitch_rad": float(camera_compensation_settings["max_angle_rad"]),
+                                       "height_m": float(camera_compensation_settings["max_height_m"])},
+            "pose_correction_rate_limits": {
+                "roll_pitch_rad_s": float(camera_compensation_settings["max_angle_rate_rad_s"]),
+                "height_m_s": float(camera_compensation_settings["max_height_rate_m_s"])}}
+    elif compensation_enabled:
+        effective_compensation_settings = dict(BODY_COMPENSATION_SETTINGS)
+        if compensation_kind == "pose_p":
+            effective_compensation_settings["roll_rate_gain_s"] = 0.0
+            effective_compensation_settings["pitch_rate_gain_s"] = 0.0
+        effective_compensation_settings.update({"enabled": True, "kind": compensation_kind})
+    else:
+        effective_compensation_settings = {"enabled": False, "kind": compensation_kind,
+                                           "active_feedback": False}
     terrain_vertices, terrain_triangles, terrain_metadata = build_terrain(config.get("terrain", {"kind": "flat"}))
     control_period = float(config.get("control_period_s", dt))
     cadence = ControlCadence(dt, control_period)
@@ -449,7 +576,9 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
                             "sensing": {"kind": sensing_mode,
                                         "contact_force_source": "previous modeled applied motor torque via local URDF Jacobian"
                                         if sensing_mode == "proprioceptive" else "simulator_contact_diagnostic"},
-                            "provenance": _runtime_provenance(PROJECT_ROOT)}
+                            "provenance": _runtime_provenance(
+                                PROJECT_ROOT, include_camera=compensation_enabled and compensation_kind == "camera_space",
+                                include_pcr_expert=walk_backend == "pcr_expert")}
     if sensing_mode == "proprioceptive":
         resolved["resolved"]["sensing"].update({
             "attitude_source": "ideal simulator quaternion treated as an IMU sample; uncalibrated",
@@ -457,17 +586,33 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
             "odometry_minimum_confirmed_support": int(sensing_config["minimum_support"])})
     resolved["resolved"]["body_compensation"] = {
         "enabled": compensation_enabled,
+        "kind": compensation_kind,
         "input_sources": ["support-foot odometry", "ideal IMU quaternion", "ideal IMU gyro sample", "estimated body velocity"],
-        "feedback_gains_and_limits": BODY_COMPENSATION_SETTINGS,
+        "effective_settings": effective_compensation_settings,
         "correction_applied_after_gait_start_only": True,
         "corrected_pose_is_not_gait_tracking_nominal": True}
+    if compensation_enabled and compensation_kind == "camera_space":
+        resolved["resolved"]["body_compensation"].update({
+            "controller_settings": camera_compensation_settings,
+            "camera_scene_template": str(camera_scene_path.relative_to(PROJECT_ROOT)),
+            "camera_scene_template_sha256": _hash(camera_scene_path),
+            "camera_scene_note": camera_scene_spec["note"],
+            "extrinsics": config["compensation_pilot"]["camera"],
+            "frozen_posture_reduced_mass_matrix": camera_mass_matrix.tolist(),
+            "generalized_coordinates": ["roll_rad", "pitch_rad", "z_m"],
+            "kinetic_energy_unit_convention": "0.5 * generalized_velocity.T @ mass_matrix @ generalized_velocity; mixed angular/linear generalized units",
+            "fixed_regularizer": "see controller_settings.regularization"})
     if openshc_executable is not None:
         resolved["resolved"]["openshc"] = openshc_source_provenance(PROJECT_ROOT, openshc_executable)
+    if walk_backend == "pcr_expert":
+        resolved["resolved"]["pcr_expert"] = json.loads(
+            (PROJECT_ROOT / "third_party/pcr_expert/provenance.json").read_text())
     (out / "resolved_config.json").write_text(json.dumps(resolved, indent=2) + "\n")
 
     gym = sim = viewer = gymapi = None
     csv_file = None
     openshc_bridge = None
+    pcr_expert = None
     status: Dict[str, Any] = {"kind": "walk_diagnostic" if mode == "walk" else "stand_diagnostic", "status": "started", "failure_reason": None,
                               "valid_training_data": False, "start_base_z_m": start_z,
                               "configured_initial_base_velocity_m_s": [0.0, 0.0, 0.0],
@@ -484,8 +629,12 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
                               "motor_torque_bandwidth_calibrated": False,
                               "actuator_torque_is_model_output_not_measured": True,
                               "body_compensation_enabled": compensation_enabled,
-                              "body_compensation_settings": BODY_COMPENSATION_SETTINGS,
+                              "body_compensation_kind": compensation_kind,
+                              "body_compensation_settings": effective_compensation_settings,
                               "initialization_stage": "pre_native"}
+    status["stop_on_violation"] = stop_on_violation
+    status["walking_violations"] = {
+        "time_base": "simulation_seconds", "counts": {}, "first_time_s": {}, "last_time_s": {}}
     status_path = out / "status.json"
     status_path.write_text(json.dumps(status, indent=2) + "\n")
     print("stand diagnostic status path: {}".format(status_path), flush=True)
@@ -630,6 +779,11 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
         _mark_initialization_stage(status_path, status, "prepare_sim")
         gym.prepare_sim(sim)
         from isaacgym import gymtorch
+        if walk_backend == "pcr_expert":
+            pcr_expert = PcrExpertAdapter(
+                device="cpu", default_joint_angles=pcr_default_joint_angles(config),
+                link_lengths_m=config["pcr_expert"]["link_lengths_m"],
+                body_half_shape_m=config["pcr_expert"]["body_half_shape_m"])
         import torch
         contact_tensor = gymtorch.wrap_tensor(gym.acquire_net_contact_force_tensor(sim))
         if not headless:
@@ -655,6 +809,10 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
                           "estimated_planned_support_contact_count", "confirmed_support_count",
                           "body_compensation_enabled", "body_compensation_roll_rad",
                           "body_compensation_pitch_rad", "body_compensation_height_m",
+                          "camera_predicted_pixel_before", "camera_predicted_pixel_after",
+                          "camera_uncontrollable_pixel_norm", "camera_mapping_rank",
+                          "camera_support_count", "camera_bound_scale", "camera_compute_time_ms",
+                          "camera_hold_reason",
                           "stance_slip_count", "max_stance_slip_m", "max_ik_residual_m"])
             for leg in LEG_ORDER:
                 names.extend(["contact_force_{}_{}_n".format(leg, axis) for axis in "xyz"])
@@ -768,8 +926,19 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
         held_saturated = np.zeros_like(qref, dtype=bool)
         velocity_reference_mode = config.get("actuator", {}).get("velocity_reference", "zero")
         velocity_feedback_mode = config.get("actuator", {}).get("velocity_feedback", "simulator")
-        body_compensator = (BoundedBodyCompensator(compensation_enabled, control_period)
-                            if "body_compensation" in config else None)
+        body_compensator = None
+        camera_compensator = None
+        if "body_compensation" in config and compensation_kind != "camera_space":
+            body_compensator = BoundedBodyCompensator(
+                compensation_enabled, control_period,
+                rate_feedback=(compensation_kind != "pose_p"))
+        if compensation_enabled and compensation_kind == "camera_space":
+            from hexapod_camera_compensation import CameraSpaceCompensator
+            camera_compensator = CameraSpaceCompensator(
+                model, qref_named, config["compensation_pilot"]["camera"],
+                camera_scene_spec["camera"], camera_scene_spec["scene"], control,
+                config["actuator"], control_period, dt, mass_matrix=camera_mass_matrix)
+        previous_applied_torque_by_name = {name: 0.0 for name in sim_dof_names}
         if proprioceptive_state is not None:
             controller_xyz = proprioceptive_state["body_xyz_m"].copy()
             controller_quat = proprioceptive_state["imu_quaternion_xyzw"].copy()
@@ -862,9 +1031,17 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
                                 model, gait, max(0.0, step * dt - gait_start_time), q_control_by_name,
                                 xyz_control, quat_control, contact_map, qref_named, feet_for_controller,
                                 body_compensator=body_compensator,
+                                camera_compensator=camera_compensator,
                                 gyro_world_rad_s=controller_gyro_world,
                                 estimated_body_velocity_m_s=estimated_body_velocity,
+                                previous_applied_torque_by_name=previous_applied_torque_by_name,
                                 control_period_s=control_period)
+                            if not stop_on_violation:
+                                for item in gait_state.get("violations", ()):
+                                    _record_violation(status, "gait_" + item, step * dt)
+                                for leg, residual in current_ik_residuals.items():
+                                    if float(residual) > 2e-5:
+                                        _record_violation(status, "ik_approximate_" + leg, step * dt)
                             if proprioceptive is not None:
                                 proprioceptive.set_support_mask(gait_state["confirmed_support"],
                                                                 controller_feet_world)
@@ -873,6 +1050,37 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
                                 controller_feet_world = {leg: value.copy() for leg, value in
                                                          proprioceptive_state["feet_world_m"].items()}
                                 controller_contacts = dict(proprioceptive_state["contact_confirmed"])
+                            qref = map_named_values(qref_named, sim_dof_names)
+                            if camera_compensator is not None:
+                                status["camera_space_last_diagnostics"] = gait_state.get(
+                                    "camera_compensation_diagnostics")
+                            status["gait_control_ticks"] = status.get("gait_control_ticks", 0) + 1
+                        elif (walk_backend == "pcr_expert" and pcr_expert is not None and
+                              walk_started and not stand_only):
+                            gait_elapsed = max(0.0, step * dt - gait_start_time)
+                            requested_speed = float(walk_settings["speed_m_s"]) * min(
+                                1.0, gait_elapsed / float(walk_settings["speed_ramp_s"]))
+                            dq_control_by_name = {name: float(dq[index])
+                                                  for index, name in enumerate(sim_dof_names)}
+                            qref_named = pcr_expert.step(
+                                q_control_by_name, dq_control_by_name, 0.0, requested_speed, 0.0)
+                            gait_state = pcr_expert.diagnostics(
+                                xyz_control, quaternion_matrix_xyzw(quat_control))
+                            gait_state["planned_body_xyz_m"] = (
+                                initial_walk_xyz + walk_forward *
+                                _pcr_reference_body_distance(gait_elapsed, float(walk_settings["speed_m_s"]),
+                                                             float(walk_settings["speed_ramp_s"])))
+                            current_ik_residuals = {leg: None for leg in LEG_ORDER}
+                            out_of_range = [name for name, value in qref_named.items()
+                                            if value < limits[name].lower_rad or value > limits[name].upper_rad]
+                            status["pcr_expert_target_joint_limit_exceedance_count"] = (
+                                status.get("pcr_expert_target_joint_limit_exceedance_count", 0) + len(out_of_range))
+                            status["pcr_expert_target_joint_limit_exceedance_sample_count"] = (
+                                status.get("pcr_expert_target_joint_limit_exceedance_sample_count", 0) +
+                                int(bool(out_of_range)))
+                            status["pcr_expert_last_target_joint_limit_exceedances"] = out_of_range
+                            status["pcr_expert_tripod_switch_count"] = pcr_expert.tripod_switch_count
+                            status["pcr_expert_reset_sent"] = pcr_expert.reset_sent
                             qref = map_named_values(qref_named, sim_dof_names)
                             status["gait_control_ticks"] = status.get("gait_control_ticks", 0) + 1
                     except (ValueError, RuntimeError, np.linalg.LinAlgError, KeyError) as exc:
@@ -904,6 +1112,8 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
                 tau = actuator_sample["applied_model_torque_nm"].astype(np.float32)
                 saturated = actuator_sample["torque_saturated"]
                 gym.apply_actor_dof_efforts(env, actor, tau)
+                previous_applied_torque_by_name = {name: float(tau[index])
+                                                   for index, name in enumerate(sim_dof_names)}
             else:
                 actuator_sample = None
                 tau, saturated = held_tau, held_saturated
@@ -962,7 +1172,6 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
                 estimated_body_velocity = vel.copy()
             controller_xyz = xyz.copy() if proprioceptive is None else controller_xyz
             controller_quat = quat.copy() if proprioceptive is None else controller_quat
-            controller_contacts = foot_contacts if proprioceptive is None else controller_contacts
             controller_feet_world = measured_feet_world if proprioceptive is None else controller_feet_world
             if failure:
                 roll = pitch = yaw = float("nan")
@@ -970,6 +1179,8 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
                 roll, pitch, yaw = _orientation_to_rpy(quat)
             foot_contacts = {leg: (float(np.linalg.norm(contact_np[idx])) > float(gate["contact_threshold_n"]))
                              if state_finite else False for leg, idx in toe_body_indices.items()}
+            if proprioceptive is None:
+                controller_contacts = foot_contacts
             contact_count = sum(foot_contacts.values())
             linear_speed = float(np.linalg.norm(vel))
             angular_speed = float(np.linalg.norm(omega))
@@ -989,7 +1200,15 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
             gait_row = {"body_compensation_enabled": int(compensation_enabled),
                         "body_compensation_roll_rad": 0.0,
                         "body_compensation_pitch_rad": 0.0,
-                        "body_compensation_height_m": 0.0}
+                        "body_compensation_height_m": 0.0,
+                        "camera_predicted_pixel_before": "",
+                        "camera_predicted_pixel_after": "",
+                        "camera_uncontrollable_pixel_norm": "",
+                        "camera_mapping_rank": "",
+                        "camera_support_count": "",
+                        "camera_bound_scale": "",
+                        "camera_compute_time_ms": "",
+                        "camera_hold_reason": ""}
             if mode == "walk" and walk_backend == "openshc" and gait_state is not None:
                 for leg in LEG_ORDER:
                     support_now = bool(gait_state["planned_support"][leg])
@@ -1027,7 +1246,8 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
                 max_slip = max(slip_by_leg.values(), default=0.0)
                 tracking_error = float(np.linalg.norm(controller_xyz - planned_body))
                 tracking_error_max = max(tracking_error_max, tracking_error)
-                max_ik = max(current_ik_residuals.values(), default=0.0)
+                ik_values = [float(value) for value in current_ik_residuals.values() if value is not None]
+                max_ik = max(ik_values) if ik_values else float("nan")
                 gait_elapsed = max(0.0, t - gait_start_time)
                 cycle_index = (openshc_bridge.completed_cycles if walk_backend == "openshc" else
                                int(gait_state["completed_cycles"]))
@@ -1061,6 +1281,17 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
                             "body_compensation_roll_rad": gait_state.get("body_compensation", {}).get("roll_rad", 0.0),
                             "body_compensation_pitch_rad": gait_state.get("body_compensation", {}).get("pitch_rad", 0.0),
                             "body_compensation_height_m": gait_state.get("body_compensation", {}).get("height_m", 0.0)}
+                camera_diag = gait_state.get("camera_compensation_diagnostics")
+                if camera_diag is not None:
+                    gait_row.update({
+                        "camera_predicted_pixel_before": camera_diag.get("predicted_pixel_before", ""),
+                        "camera_predicted_pixel_after": camera_diag.get("predicted_pixel_after", ""),
+                        "camera_uncontrollable_pixel_norm": camera_diag.get("uncontrollable_pixel_norm", ""),
+                        "camera_mapping_rank": camera_diag.get("image_mapping_rank", ""),
+                        "camera_support_count": camera_diag.get("support_count", ""),
+                        "camera_bound_scale": camera_diag.get("bound_scale", ""),
+                        "camera_compute_time_ms": camera_diag.get("compute_time_ms", ""),
+                        "camera_hold_reason": camera_diag.get("hold_reason") or ""})
                 for leg in LEG_ORDER:
                     for axis, value in zip("xyz", desired_feet[leg]):
                         gait_row["desired_foot_{}_{}_m".format(leg, axis)] = value
@@ -1091,12 +1322,20 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
                 q_error_sq_sum += float(np.dot(q_error, q_error))
                 q_error_values += len(q_error)
                 q_error_max = max(q_error_max, float(np.max(np.abs(q_error))))
-                if tracking_error > float(walk_settings["max_tracking_error_m"]):
-                    failure = "planned_body_tracking_error"
-                elif support_mismatch_ticks >= int(math.ceil(float(walk_settings["support_failure_s"]) / dt)):
-                    failure = "planned_support_contact_loss"
-                elif max(slip_consecutive.values(), default=0) >= int(math.ceil(float(walk_settings["slip_failure_s"]) / dt)):
-                    failure = "persistent_stance_slip"
+                if stop_on_violation:
+                    if tracking_error > float(walk_settings["max_tracking_error_m"]):
+                        failure = "planned_body_tracking_error"
+                    elif support_mismatch_ticks >= int(math.ceil(float(walk_settings["support_failure_s"]) / dt)):
+                        failure = "planned_support_contact_loss"
+                    elif max(slip_consecutive.values(), default=0) >= int(math.ceil(float(walk_settings["slip_failure_s"]) / dt)):
+                        failure = "persistent_stance_slip"
+                else:
+                    if tracking_error > float(walk_settings["max_tracking_error_m"]):
+                        _record_violation(status, "planned_body_tracking_error", (step + 1) * dt)
+                    if support_mismatch_ticks >= int(math.ceil(float(walk_settings["support_failure_s"]) / dt)):
+                        _record_violation(status, "planned_support_contact_loss", (step + 1) * dt)
+                    if max(slip_consecutive.values(), default=0) >= int(math.ceil(float(walk_settings["slip_failure_s"]) / dt)):
+                        _record_violation(status, "persistent_stance_slip", (step + 1) * dt)
             row = {"time_s": (step + 1) * dt, "root_x_m": xyz[0], "root_y_m": xyz[1], "root_z_m": xyz[2], "roll_rad": roll,
                    "pitch_rad": pitch, "yaw_rad": yaw, "vx_m_s": vel[0], "vy_m_s": vel[1], "vz_m_s": vel[2],
                    "wx_rad_s": omega[0], "wy_rad_s": omega[1], "wz_rad_s": omega[2], "contact_count": contact_count,
@@ -1212,7 +1451,7 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
                                 status["openshc_pose_feedback_enabled"] = False
                                 status["openshc_admittance_enabled"] = False
                                 status["openshc_autopose_enabled"] = False
-                            else:
+                            elif walk_backend == "python_tripod":
                                 rotation_yaw = np.array([[math.cos(yaw0), -math.sin(yaw0), 0.0],
                                                         [math.sin(yaw0), math.cos(yaw0), 0.0], [0.0, 0.0, 1.0]])
                                 nominal_feet = {leg: rotation_yaw.T @ (controller_feet_world[leg] - controller_xyz)
@@ -1234,6 +1473,12 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
                                     controller_feet_world = {leg: value.copy() for leg, value in
                                                              proprioceptive_state["feet_world_m"].items()}
                                     controller_contacts = dict(proprioceptive_state["contact_confirmed"])
+                            elif walk_backend == "pcr_expert":
+                                status["pcr_expert_initialization"] = {
+                                    "state_source": "measured_named_joint_position_and_velocity",
+                                    "command_frame": "body axes; forward is +y",
+                                    "reset_sent_at": "first post-gate control tick",
+                                    "gait_geometry_source": "vendored ExpertGround constants"}
                             gait_start_time = t
                             initial_walk_xyz = controller_xyz.copy()
                             initial_walk_truth_xyz = xyz.copy()
@@ -1260,14 +1505,21 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
                 stand_window.reset()
                 if mode != "walk" or not stand_start_verified:
                     stable = False
+            threshold_failures = []
             if pos_bad:
-                failure = "joint_position_limit"
-            elif vel_bad:
-                failure = "joint_velocity_limit"
-            elif max(abs(roll), abs(pitch)) > float(gate["max_tilt_rad"]):
-                failure = "tilt_limit"
-            elif controller_xyz[2] < float(initial["base_z_min_m"]):
-                failure = "base_height_limit"
+                threshold_failures.append("joint_position_limit")
+            if vel_bad:
+                threshold_failures.append("joint_velocity_limit")
+            if max(abs(roll), abs(pitch)) > float(gate["max_tilt_rad"]):
+                threshold_failures.append("tilt_limit")
+            if controller_xyz[2] < float(initial["base_z_min_m"]):
+                threshold_failures.append("base_height_limit")
+            if stop_on_violation:
+                if threshold_failures:
+                    failure = threshold_failures[0]
+            else:
+                for threshold_failure in threshold_failures:
+                    _record_violation(status, threshold_failure, (step + 1) * dt)
             if failure:
                 stand_window.reset()
                 if mode != "walk" or not stand_start_verified:
@@ -1349,6 +1601,28 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
                            "joint_position_error_max_rad": q_error_max if q_error_values else None,
                            "torque_saturation_fraction": saturation_fraction,
                            "walk_sample_count": walk_samples})
+            acceptance_reasons = []
+            if not stand_only:
+                if last_cycle_index < int(walk_settings["minimum_cycles"]):
+                    acceptance_reasons.append("minimum_cycles_not_reached")
+                progress_reason = walk_progress_failure(
+                    cycle_progress, simulator_truth_net_displacement,
+                    int(walk_settings["minimum_cycles"]),
+                    float(walk_settings["minimum_net_forward_displacement_m"]),
+                    float(walk_settings["minimum_completed_cycle_displacement_m"]))
+                if progress_reason and progress_reason not in acceptance_reasons:
+                    acceptance_reasons.append(progress_reason)
+                if saturation_fraction > float(walk_settings["max_saturation_fraction"]):
+                    acceptance_reasons.append("torque_saturation_fraction_exceeded")
+                if not stop_on_violation:
+                    for reason in acceptance_reasons:
+                        _record_violation(status, reason, duration)
+            status["walking_acceptance"] = {
+                "accepted": (not acceptance_reasons and not status["walking_violations"]["counts"] and
+                             failure is None and stand_start_verified and
+                             status["sample_count"] >= max_steps and not interrupted_by_viewer),
+                "reasons": acceptance_reasons + sorted(status["walking_violations"]["counts"]),
+                "time_completed": status["sample_count"] >= max_steps and not interrupted_by_viewer}
             if stand_only:
                 status["status"] = "stand_verified" if stable and failure is None else "failed_start"
             elif failure and not walk_started:
@@ -1358,20 +1632,22 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
             elif not stand_start_verified:
                 status["status"] = "failed_start"
                 failure = "no_contiguous_stand_gate_window"
-            elif last_cycle_index < int(walk_settings["minimum_cycles"]):
+            elif acceptance_reasons:
+                if not stop_on_violation and status["walking_acceptance"]["time_completed"]:
+                    status["status"] = "completed_with_violations"
+                    status["walking_acceptance"]["accepted"] = False
+                else:
+                    status["status"] = "walk_incomplete"
+                    failure = acceptance_reasons[0]
+            elif status["walking_violations"]["counts"]:
+                if not stop_on_violation and status["walking_acceptance"]["time_completed"]:
+                    status["status"] = "completed_with_violations"
+                    status["walking_acceptance"]["accepted"] = False
+                else:
+                    status["status"] = "walk_incomplete"
+            elif status["sample_count"] < max_steps:
                 status["status"] = "walk_incomplete"
-                failure = "minimum_cycles_not_reached"
-            elif progress_failure := walk_progress_failure(
-                    cycle_progress,
-                    simulator_truth_net_displacement,
-                    int(walk_settings["minimum_cycles"]),
-                    float(walk_settings["minimum_net_forward_displacement_m"]),
-                    float(walk_settings["minimum_completed_cycle_displacement_m"])):
-                status["status"] = "walk_incomplete"
-                failure = progress_failure
-            elif saturation_fraction > float(walk_settings["max_saturation_fraction"]):
-                status["status"] = "walk_incomplete"
-                failure = "torque_saturation_fraction_exceeded"
+                failure = "duration_not_completed"
             else:
                 status["status"] = "walk_completed"
         else:

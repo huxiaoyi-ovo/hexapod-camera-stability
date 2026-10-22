@@ -46,12 +46,16 @@ def body_reference_rotation(yaw_rad: float, roll_correction_rad: float,
 class BoundedBodyCompensator:
     """Fixed-gain 50 Hz RPZ correction using only estimated proprioceptive state."""
 
-    def __init__(self, enabled: bool, control_period_s: float = 0.02):
+    def __init__(self, enabled: bool, control_period_s: float = 0.02,
+                 rate_feedback: bool = True):
         if type(enabled) is not bool:
             raise ValueError("compensation enabled must be a boolean")
+        if type(rate_feedback) is not bool:
+            raise ValueError("rate_feedback must be a boolean")
         if type(control_period_s) not in (int, float) or not math.isfinite(float(control_period_s)) or control_period_s <= 0:
             raise ValueError("control period must be positive and finite")
         self.enabled = enabled
+        self.rate_feedback = rate_feedback
         self.dt = float(control_period_s)
         self.reset()
 
@@ -89,10 +93,12 @@ class BoundedBodyCompensator:
         roll, pitch, _ = _rpy_from_rotation(rotation_world_body)
         omega_body = rotation_world_body.T @ gyro_world
         target_roll = float(np.clip(-SETTINGS["roll_angle_gain"] * roll -
-                                    SETTINGS["roll_rate_gain_s"] * omega_body[0],
+                                    (SETTINGS["roll_rate_gain_s"] * omega_body[0]
+                                     if self.rate_feedback else 0.0),
                                     -SETTINGS["max_angle_rad"], SETTINGS["max_angle_rad"]))
         target_pitch = float(np.clip(-SETTINGS["pitch_angle_gain"] * pitch -
-                                     SETTINGS["pitch_rate_gain_s"] * omega_body[1],
+                                     (SETTINGS["pitch_rate_gain_s"] * omega_body[1]
+                                      if self.rate_feedback else 0.0),
                                      -SETTINGS["max_angle_rad"], SETTINGS["max_angle_rad"]))
         target_height = float(np.clip(SETTINGS["height_gain_s"] *
                                       (float(planned_body_z_m) - xyz[2]) -

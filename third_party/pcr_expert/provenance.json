@@ -1,0 +1,80 @@
+{
+  "upstream_repository": "/home/artrc/Pcrnet_hexapod",
+  "upstream_commit": "826fdac8bb49403af3fa53f4b967738257ebf0bb",
+  "files": {
+    "expert.py": {
+      "upstream_path": "legged_gym/envs/hex_v4/expert.py",
+      "upstream_sha256": "0b8bd223ac2d002594fbef49721a636f21cf06ce918529240905d2a48d737384",
+      "local_sha256": "c1265e805a497b65fa46fd3da9e10cd8a221e2fb1fcbf150d1005c76fecb0a24",
+      "changes": [
+        "Removed runtime imports of upstream config classes; replaced their annotation names with local placeholders.",
+        "Changed Kinematic import to this vendored package. Algorithm methods and constants otherwise copied verbatim."
+      ]
+    },
+    "kinematic.py": {
+      "upstream_path": "legged_gym/utils/kinematic.py",
+      "upstream_sha256": "5ae601f4509c368be1b8a395cd316bb9f16fcd88ab7811829f71edf7114a5112",
+      "local_sha256": "5ae601f4509c368be1b8a395cd316bb9f16fcd88ab7811829f71edf7114a5112",
+      "changes": []
+    },
+    "LICENSE": {
+      "upstream_path": "LICENSE",
+      "license": "BSD-3-Clause",
+      "copyright": [
+        "ETH Zurich, Nikita Rudin",
+        "NVIDIA Corporation & Affiliates"
+      ]
+    }
+  },
+  "algorithm_geometry": {
+    "link_lengths_m": [
+      0.072,
+      0.13,
+      0.17
+    ],
+    "body_half_shape_m": {
+      "x": 0.1,
+      "y": 0.22
+    },
+    "note": "Retained source lengths [0.072, 0.13, 0.17] unchanged. The local URDF ankle-to-toe offset differs by 15.5 mm; see local_urdf_comparison.",
+    "local_urdf_comparison": {
+      "joint_origin_lengths_m": [
+        0.072,
+        0.13,
+        0.1855
+      ],
+      "source_minus_local_last_link_m": -0.0155,
+      "body_half_shape_m": {
+        "x": 0.1,
+        "y": 0.22
+      },
+      "note": "URDF ankle-to-toe fixed offset is 0.1855 m versus ExpertGround l3=0.17 m; hip origins match body half-shape. The source kinematics constants remain unchanged."
+    }
+  },
+  "adapter_contract": {
+    "canonical_leg_order": [
+      "lb",
+      "lf",
+      "lm",
+      "rb",
+      "rf",
+      "rm"
+    ],
+    "joint_order_per_leg": [
+      "thigh",
+      "knee",
+      "ankle"
+    ],
+    "command_columns": [
+      "reset",
+      "body_x_m_s",
+      "body_y_m_s",
+      "vz_unused",
+      "yaw_rad_s"
+    ],
+    "runtime_sample_period_s": 0.02,
+    "source_cycle_definition": "one completed cycle is two event-driven tripod switches",
+    "frequency_duty_and_swing_height": "present only for shared config schema; unused by ExpertGround",
+    "actuator_boundary": "local MIT_PD model; not PCR actuator-network replication"
+  }
+}

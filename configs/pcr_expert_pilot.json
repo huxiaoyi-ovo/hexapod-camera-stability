@@ -1,0 +1,142 @@
+{
+  "description": "Standalone reproduction of the handwritten upstream PCR ExpertGround gait controller with local PhysX and MIT_PD actuation; flat-ground exploratory run.",
+  "mode": "walk",
+  "walk_controller": "pcr_expert",
+  "robot_urdf": "assets/hexapod/urdf/hex_ground.urdf",
+  "asset_import": {
+    "flip_visual_attachments": true
+  },
+  "leg_order": [
+    "lb",
+    "lf",
+    "lm",
+    "rb",
+    "rf",
+    "rm"
+  ],
+  "joint_types": [
+    "thigh",
+    "knee",
+    "ankle"
+  ],
+  "stand_reference_rad": {
+    "thigh_by_leg": {
+      "lb": 0.5,
+      "lf": -0.5,
+      "lm": 0.0,
+      "rb": -0.5,
+      "rf": 0.5,
+      "rm": 0.0
+    },
+    "knee": 0.67,
+    "ankle": -2.2
+  },
+  "initial": {
+    "base_xy_m": [
+      0.0,
+      0.0
+    ],
+    "yaw_rad": 0.0,
+    "toe_clearance_m": 0.002,
+    "base_z_min_m": 0.035
+  },
+  "physics": {
+    "dt_s": 0.0025,
+    "substeps": 1,
+    "gravity_m_s2": [
+      0.0,
+      0.0,
+      -9.81
+    ],
+    "solver_type": "TGS",
+    "position_iterations": 4,
+    "velocity_iterations": 0,
+    "contact_offset_m": 0.01,
+    "rest_offset_m": 0.0,
+    "max_depenetration_velocity_m_s": 0.2,
+    "bounce_threshold_velocity_m_s": 0.5,
+    "plane_static_friction": 1.0,
+    "plane_dynamic_friction": 1.0,
+    "plane_restitution": 0.0,
+    "gpu_pipeline": false,
+    "gpu_physics": true,
+    "self_collision": true,
+    "fixed_base": false,
+    "collapse_fixed_joints": false
+  },
+  "control_period_s": 0.02,
+  "control": {
+    "mode": "MIT_PD",
+    "kp_nm_rad": 50.0,
+    "kd_nm_s_rad": 1.5,
+    "effort_limit_nm": 27.0,
+    "joint_velocity_limit_rad_s": 5.0,
+    "position_tolerance_rad": 0.0001,
+    "velocity_tolerance_rad_s": 0.0001
+  },
+  "actuator": {
+    "kind": "MIT_PD",
+    "internal_period_s": 0.0025,
+    "command_delay_s": 0.02,
+    "torque_bandwidth_hz": 80.0,
+    "torque_feedforward_nm": 0.0,
+    "velocity_reference": "zero",
+    "velocity_feedback": "simulator"
+  },
+  "gate": {
+    "eligible_after_s": 1.5,
+    "window_s": 0.5,
+    "min_contacts": 3,
+    "contact_threshold_n": 1.0,
+    "max_abs_roll_pitch_rad": 0.15,
+    "max_linear_speed_m_s": 0.12,
+    "max_angular_speed_rad_s": 0.25,
+    "max_abs_vertical_speed_m_s": 0.06,
+    "max_tilt_rad": 1.0471975511965976
+  },
+  "walk": {
+    "speed_m_s": 0.5,
+    "frequency_hz": 0.8,
+    "duty_factor": 0.7,
+    "swing_height_m": 0.04,
+    "speed_ramp_s": 2.0,
+    "start_timeout_s": 6.0,
+    "touchdown_timeout_s": 0.12,
+    "max_stance_slip_m": 0.04,
+    "slip_failure_s": 0.03,
+    "max_tracking_error_m": 0.2,
+    "max_saturation_fraction": 0.25,
+    "min_support_contacts": 2,
+    "support_failure_s": 0.1,
+    "minimum_cycles": 5,
+    "minimum_net_forward_displacement_m": 1.25,
+    "minimum_completed_cycle_displacement_m": 0.005,
+    "terrain_adaptation": {
+      "probe_speed_m_s": 0.04,
+      "probe_max_depth_m": 0.015,
+      "probe_timeout_s": 0.4,
+      "liftoff_timeout_s": 0.4,
+      "body_z_rate_m_s": 0.02
+    }
+  },
+  "duration_s": 20.0,
+  "sim_device": "cuda:0",
+  "sensing": {
+    "kind": "legacy_simulator"
+  },
+  "terrain": {
+    "kind": "flat"
+  },
+  "stop_on_violation": false,
+  "pcr_expert": {
+    "link_lengths_m": [
+      0.072,
+      0.13,
+      0.17
+    ],
+    "body_half_shape_m": {
+      "x": 0.1,
+      "y": 0.22
+    }
+  }
+}

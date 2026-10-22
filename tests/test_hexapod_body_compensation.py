@@ -16,6 +16,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from camera_pose_recorder import CameraPoseRecorder
 from hexapod_body_compensation import BoundedBodyCompensator
+from hexapod_camera_compensation import (CameraSpaceCompensator, camera_residual_twist,
+                                         generalized_mass_matrix, uncontrollable_projection)
 from hexapod_robot import LEG_ORDER, load_robot_model, stand_target_by_name, toe_positions_base
 from hexapod_sim import PROJECT_ROOT, _walk_control_targets, load_config
 from hexapod_walk import TripodGait, feet_world
@@ -69,6 +71,15 @@ class BodyCompensationTests(unittest.TestCase):
         self.assertLess(output["roll_rad"], 0.0)
         self.assertGreater(output["roll_rad"], -0.0004)
         self.assertAlmostEqual(output["pitch_rad"], 0.0)
+
+    def test_pose_p_ignores_rate_feedback_but_keeps_angle_feedback(self):
+        quat = Rotation.from_euler("x", 0.02).as_quat()
+        slow = BoundedBodyCompensator(True, rate_feedback=False).update(
+            quat, np.array([0.0, 0.0, 0.0]), np.array([0.0, 0.0, 0.1]), np.zeros(3), 0.1)
+        fast = BoundedBodyCompensator(True, rate_feedback=False).update(
+            quat, np.array([3.0, -2.0, 1.0]), np.array([0.0, 0.0, 0.1]), np.zeros(3), 0.1)
+        self.assertEqual(slow, fast)
+        self.assertLess(slow["roll_rad"], 0.0)
 
     def test_angle_and_consistent_gyro_are_attenuated_at_12_5_hz(self):
         amplitude_rad = 1e-4
@@ -155,6 +166,87 @@ class BodyCompensationTests(unittest.TestCase):
             t, actual, reference = read_trace(output)
             projected = image_motion_metrics(t, actual - reference, camera, scene)
             self.assertGreater(projected.jitter_px_rms_per_frame, 1e-3)
+
+    def test_camera_space_mapping_is_finite_and_nominal_motion_is_zero(self):
+        config_path = ROOT / "configs/camera_space_pilot.json"
+        config = load_config(config_path)
+        self.assertEqual(config["body_compensation"], {"enabled": True, "kind": "camera_space"})
+        model = load_robot_model(ROOT / config["robot_urdf"])
+        q = stand_target_by_name(model, config["stand_reference_rad"])
+        mass = generalized_mass_matrix(model, q)
+        self.assertTrue(np.all(np.linalg.eigvalsh(mass) > 0.0))
+        pilot = config["compensation_pilot"]
+        scene_data = json.loads((ROOT / pilot["camera_scene_template"]).read_text())
+        controller = CameraSpaceCompensator(model, q, pilot["camera"], scene_data["camera"],
+                                            scene_data["scene"], config["control"],
+                                            config["actuator"], config["control_period_s"],
+                                            config["physics"]["dt_s"])
+        body = np.array([0.0, 0.0, 0.116])
+        quat = np.array([0.0, 0.0, 0.0, 1.0])
+        anchors = feet_world(model, q, body, quat)
+        velocity = np.array([0.0, 0.1, 0.0])
+        kwargs = dict(q_by_name=q, support={leg: True for leg in LEG_ORDER},
+                      planned_body=body, yaw=0.0, anchors=anchors,
+                      estimated_xyz=body, estimated_velocity=velocity,
+                      imu_quaternion=quat, gyro_world=np.zeros(3),
+                      nominal_velocity_world=velocity,
+                      previous_applied_torque_by_name={name: 0.0 for name in q})
+        correction, diagnostic = controller.update(**kwargs)
+        self.assertEqual(diagnostic["support_count"], 6)
+        self.assertGreaterEqual(diagnostic["mapping_rank"], 2)
+        self.assertLess(diagnostic["predicted_pixel_before"], 1e-9)
+        self.assertTrue(np.all(np.isfinite(correction)))
+
+        pitched = Rotation.from_euler("y", 0.02).as_quat()
+        kwargs["imu_quaternion"] = pitched
+        kwargs["gyro_world"] = np.array([0.0, 0.05, 0.0])
+        _, disturbed = controller.update(**kwargs)
+        self.assertGreater(disturbed["predicted_pixel_before"], 1e-6)
+        self.assertTrue(np.isfinite(disturbed["predicted_pixel_after"]))
+        self.assertLessEqual(disturbed["predicted_pixel_after"],
+                             disturbed["predicted_pixel_before"] + 1e-12)
+        self.assertLessEqual(abs(controller.correction[0]), 0.05)
+        self.assertLessEqual(abs(controller.correction[1]), 0.05)
+        self.assertLessEqual(abs(controller.correction[0]), 0.006)
+        self.assertLessEqual(abs(controller.correction[1]), 0.006)
+
+    def test_camera_lever_arm_and_uncontrollable_projection_are_explicit(self):
+        rotation = np.eye(3)
+        omega = np.array([0.0, 0.0, 1.0])
+        with_lever = camera_residual_twist(rotation, rotation, np.array([0.0, 0.18, 0.04]),
+                                           np.zeros(3), omega, np.zeros(3))
+        at_origin = camera_residual_twist(rotation, rotation, np.zeros(3),
+                                          np.zeros(3), omega, np.zeros(3))
+        np.testing.assert_allclose(with_lever[:3], [-0.18, 0.0, 0.0])
+        np.testing.assert_allclose(at_origin[:3], np.zeros(3))
+        mapping = np.array([[1.0], [0.0]])
+        remaining = uncontrollable_projection(mapping, np.array([2.0, 3.0]))
+        np.testing.assert_allclose(remaining, [0.0, 3.0], atol=1e-12)
+
+    def test_camera_response_includes_delay_and_is_not_instantaneous(self):
+        config = load_config(ROOT / "configs/camera_space_pilot.json")
+        model = load_robot_model(ROOT / config["robot_urdf"])
+        q = stand_target_by_name(model, config["stand_reference_rad"])
+        pilot = config["compensation_pilot"]
+        scene = json.loads((ROOT / pilot["camera_scene_template"]).read_text())
+        controller = CameraSpaceCompensator(model, q, pilot["camera"], scene["camera"],
+                                            scene["scene"], config["control"], config["actuator"],
+                                            config["control_period_s"], config["physics"]["dt_s"])
+        body = np.array([0.0, 0.0, 0.116])
+        anchors = feet_world(model, q, body, np.array([0.0, 0.0, 0.0, 1.0]))
+        q_map, _ = controller._support_map(q, body, 0.0, anchors, {leg: True for leg in LEG_ORDER})
+        transition, input_step = controller._discrete_response(q_map)
+        equilibrium = np.array([0.001, -0.0015, 0.0002])
+        equilibrium_state = np.r_[equilibrium, np.zeros(6)]
+        stationary = (transition @ equilibrium_state +
+                      input_step @ np.r_[equilibrium, np.zeros(3)])
+        np.testing.assert_allclose(stationary, equilibrium_state, atol=1e-12)
+        before_delay = controller._step_response(np.array([1.0, 0.0, 0.0]), transition,
+                                                  input_step, 8)
+        after_delay = controller._step_response(np.array([1.0, 0.0, 0.0]), transition,
+                                                 input_step, 16)
+        np.testing.assert_allclose(before_delay, np.zeros(3), atol=1e-15)
+        self.assertGreater(float(np.linalg.norm(after_delay)), 0.0)
 
 
 if __name__ == "__main__":

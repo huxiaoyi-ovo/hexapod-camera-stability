@@ -12,7 +12,8 @@ from hexapod_actuator import MitPdActuator
 from hexapod_sim import load_config
 from hexapod_walk import (ControlCadence, StandStartGate, TRIPOD_A, TRIPOD_B,
                           TripodGait, create_gait_after_stand_gate, leg_fk_jacobian,
-                          leg_inverse_kinematics, walk_progress_failure)
+                          leg_inverse_kinematics, walk_progress_failure, _smoothstep,
+                          _velocity_plateau_progress, _velocity_profile_blend_fraction)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -43,6 +44,45 @@ class HexapodWalkTests(unittest.TestCase):
                     perturbed[name] += 1e-6
                     next_point = toe_positions_base(self.model, perturbed)["l_{}_toe".format(leg)]
                     np.testing.assert_allclose((next_point - point) / 1e-6, jacobian[:, index], atol=2e-6)
+
+    def test_ik_log_mode_returns_bounded_best_effort_while_strict_rejects(self):
+        leg = "lf"
+        target = self.feet["l_{}_toe".format(leg)] + np.array([0.0, 0.0, 0.25])
+        with self.assertRaisesRegex(ValueError, "unreachable"):
+            leg_inverse_kinematics(self.model, leg, target, self.q)
+        solved, residual = leg_inverse_kinematics(
+            self.model, leg, target, self.q, allow_approximate=True)
+        self.assertGreater(residual, 2e-5)
+        for name, value in solved.items():
+            self.assertGreaterEqual(value, self.model.limits[name].lower_rad)
+            self.assertLessEqual(value, self.model.limits[name].upper_rad)
+
+    def test_log_only_touchdown_timeout_preserves_contact_and_anchor_state(self):
+        settings = {"speed_m_s": 0.02, "frequency_hz": 1.0, "duty_factor": 0.6,
+                    "swing_height_m": 0.015, "speed_ramp_s": 2.0,
+                    "touchdown_timeout_s": 0.05, "max_stance_slip_m": 0.04}
+        body = np.array([0.0, 0.0, 0.116])
+        nominal = {leg: self.feet["l_{}_toe".format(leg)] for leg in LEG_ORDER}
+        feet = {leg: point + body for leg, point in nominal.items()}
+        contacts = {leg: True for leg in LEG_ORDER}
+        strict = TripodGait(nominal, feet, body, 0.0, settings)
+        strict.update(0.0, feet, contacts)
+        strict.update(0.15, feet, contacts)
+        contacts["rf"] = False
+        strict.update(1.0, feet, contacts)
+        with self.assertRaisesRegex(RuntimeError, "contact at touchdown"):
+            strict.update(1.06, feet, contacts)
+
+        exploratory = TripodGait(nominal, feet, body, 0.0,
+                                 dict(settings, stop_on_violation=False))
+        exploratory.update(0.0, feet, contacts)
+        exploratory.update(0.15, feet, contacts)
+        exploratory.update(1.0, feet, contacts)
+        state = exploratory.update(1.06, feet, contacts)
+        self.assertIn("touchdown_timeout_rf", state["violations"])
+        self.assertTrue(state["planned_support"]["rf"])
+        self.assertFalse(contacts["rf"])
+        self.assertIn("rf", state["pending_touchdown_s"])
 
     def test_bounded_ik_roundtrip_and_unreachable_rejection(self):
         for leg in LEG_ORDER:
@@ -211,6 +251,102 @@ class HexapodWalkTests(unittest.TestCase):
             phase = elapsed_s * settings["frequency_hz"]
             self.assertAlmostEqual(state["cycle_phase"], phase % 1.0)
             self.assertEqual(state["completed_cycles"], int(phase))
+
+    def test_centered_velocity_profile_has_c2_ends_and_bounded_plateau_rate(self):
+        swing_duration = 0.45
+        edge = _velocity_profile_blend_fraction(swing_duration)
+        self.assertAlmostEqual(edge, 0.02 / swing_duration)
+        self.assertEqual(_velocity_plateau_progress(0.0, edge), (0.0, 0.0))
+        self.assertEqual(_velocity_plateau_progress(1.0, edge), (1.0, 0.0))
+        endpoint_delta = 1e-8
+        self.assertLess(abs(_velocity_plateau_progress(endpoint_delta, edge)[1] / endpoint_delta), 1e-3)
+        self.assertLess(abs(_velocity_plateau_progress(1.0 - endpoint_delta, edge)[1] / endpoint_delta), 1e-3)
+
+        delta = 1e-8
+        for join in (edge, 1.0 - edge):
+            value, slope = _velocity_plateau_progress(join, edge)
+            left_value, left_slope = _velocity_plateau_progress(join - delta, edge)
+            right_value, right_slope = _velocity_plateau_progress(join + delta, edge)
+            self.assertAlmostEqual(value, left_value, places=7)
+            self.assertAlmostEqual(value, right_value, places=7)
+            self.assertAlmostEqual(slope, left_slope, places=5)
+            self.assertAlmostEqual(slope, right_slope, places=5)
+            self.assertLess(abs((slope - left_slope) / delta), 1e-3)
+            self.assertLess(abs((right_slope - slope) / delta), 1e-3)
+
+        rates = [_velocity_plateau_progress(i / 1000.0, edge)[1] for i in range(1001)]
+        self.assertAlmostEqual(max(rates), 1.0 / (1.0 - edge), places=12)
+        self.assertTrue(all(0.0 <= rate <= 1.0 / (1.0 - edge) + 1e-12 for rate in rates))
+
+    def test_centered_velocity_uses_ramp_aware_landing_and_caches_swing_blend(self):
+        settings = {"speed_m_s": 0.5, "frequency_hz": 1.0, "duty_factor": 0.55,
+                    "swing_height_m": 0.04, "speed_ramp_s": 2.0,
+                    "touchdown_timeout_s": 0.12, "max_stance_slip_m": 0.04,
+                    "trajectory_profile": "centered_velocity"}
+        body = np.array([0.0, 0.0, 0.116])
+        nominal = {leg: self.feet["l_{}_toe".format(leg)] for leg in LEG_ORDER}
+        feet = {leg: point + body for leg, point in nominal.items()}
+        contacts = {leg: True for leg in LEG_ORDER}
+        gait = TripodGait(nominal, feet, body, 0.0, settings)
+        gait.update(0.0, feet, contacts)
+
+        # At 10% swing progress, the 20 ms edge has ended and the plateau is active.
+        state = gait.update(0.595, feet, contacts)
+        touchdown_time = 1.0
+        stance_end = gait.body_reference(touchdown_time + settings["duty_factor"] /
+                                         settings["frequency_hz"])
+        touchdown_body = gait.body_reference(touchdown_time)
+        lead = 0.5 * (stance_end[:2] - touchdown_body[:2])
+        expected_end = touchdown_body + nominal["lb"]
+        expected_end[:2] += lead
+        np.testing.assert_allclose(gait.swing_end["lb"], expected_end, atol=1e-12)
+        self.assertLess(lead[1], settings["speed_m_s"] * settings["duty_factor"] /
+                        (2.0 * settings["frequency_hz"]))
+
+        adaptive_settings = dict(settings, terrain_adaptation={
+            "probe_max_depth_m": 0.015, "probe_timeout_s": 0.4, "probe_speed_m_s": 0.04,
+            "liftoff_timeout_s": 0.4, "body_z_rate_m_s": 0.02, "toe_radius_m": 0.03})
+        adaptive = TripodGait(nominal, feet, body, 0.0, adaptive_settings)
+        adaptive.update(0.0, feet, contacts)
+        adaptive.update(0.595, feet, contacts)
+        np.testing.assert_allclose(adaptive.swing_end["lb"], expected_end, atol=1e-12)
+
+        cached_edge = gait.swing_blend_fraction["lb"]
+        progress = (0.595 - settings["duty_factor"]) / (1.0 - settings["duty_factor"])
+        smooth = _velocity_plateau_progress(progress, cached_edge)[0]
+        expected_foot = gait.swing_start["lb"] + smooth * (gait.swing_end["lb"] - gait.swing_start["lb"])
+        expected_foot[2] += settings["swing_height_m"] * 16.0 * progress**2 * (1.0 - progress)**2
+        np.testing.assert_allclose(state["desired_feet_world"]["lb"], expected_foot, atol=1e-12)
+
+        gait.set_parameters(0.595, frequency_hz=1.4)
+        changed = gait.update(0.62, feet, contacts)
+        self.assertEqual(gait.swing_blend_fraction["lb"], cached_edge)
+        progress = (changed["phase_by_leg"]["lb"] - settings["duty_factor"]) / (1.0 - settings["duty_factor"])
+        smooth = _velocity_plateau_progress(progress, cached_edge)[0]
+        expected_foot = gait.swing_start["lb"] + smooth * (gait.swing_end["lb"] - gait.swing_start["lb"])
+        expected_foot[2] += settings["swing_height_m"] * 16.0 * progress**2 * (1.0 - progress)**2
+        np.testing.assert_allclose(changed["desired_feet_world"]["lb"], expected_foot, atol=1e-12)
+
+    def test_missing_profile_keeps_legacy_quintic_and_neutral_touchdown(self):
+        settings = {"speed_m_s": 0.5, "frequency_hz": 1.0, "duty_factor": 0.55,
+                    "swing_height_m": 0.04, "speed_ramp_s": 2.0,
+                    "touchdown_timeout_s": 0.12, "max_stance_slip_m": 0.04}
+        body = np.array([0.0, 0.0, 0.116])
+        nominal = {leg: self.feet["l_{}_toe".format(leg)] for leg in LEG_ORDER}
+        feet = {leg: point + body for leg, point in nominal.items()}
+        contacts = {leg: True for leg in LEG_ORDER}
+        gait = TripodGait(nominal, feet, body, 0.0, settings)
+        gait.update(0.0, feet, contacts)
+        state = gait.update(0.595, feet, contacts)
+
+        np.testing.assert_array_equal(gait.swing_end["lb"],
+                                      gait.body_reference(1.0) + nominal["lb"])
+        progress = 0.1
+        smooth = _smoothstep(progress)
+        expected = gait.swing_start["lb"] + smooth * (gait.swing_end["lb"] - gait.swing_start["lb"])
+        expected[2] += settings["swing_height_m"] * 16.0 * progress**2 * (1.0 - progress)**2
+        np.testing.assert_allclose(state["desired_feet_world"]["lb"], expected, atol=1e-12)
+        self.assertNotIn("lb", gait.swing_blend_fraction)
 
     def test_gait_start_requires_verified_continuous_stand(self):
         gate = StandStartGate(window_s=0.5, timeout_s=3.0)
