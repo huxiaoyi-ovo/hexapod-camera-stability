@@ -268,11 +268,22 @@ def load_config(path: Union[str, Path]) -> Dict[str, Any]:
             raise ValueError("walk_controller must be python_tripod, openshc, or pcr_expert")
         if walk_controller == "pcr_expert":
             pcr_settings = config.get("pcr_expert")
+            pcr_required = {"link_lengths_m", "body_half_shape_m"}
+            pcr_allowed = pcr_required | {"swing_speed_scale", "swing_apex_z_m"}
             if (not isinstance(pcr_settings, dict) or
-                    set(pcr_settings) != {"link_lengths_m", "body_half_shape_m"} or
+                    not pcr_required.issubset(pcr_settings) or set(pcr_settings) - pcr_allowed or
                     pcr_settings["link_lengths_m"] != [0.072, 0.13, 0.17] or
                     pcr_settings["body_half_shape_m"] != {"x": 0.1, "y": 0.22}):
                 raise ValueError("pcr_expert requires the frozen source geometry settings")
+            swing_speed_scale = pcr_settings.get("swing_speed_scale", 1.0)
+            swing_apex_z_m = pcr_settings.get("swing_apex_z_m", 0.02)
+            if (type(swing_speed_scale) not in (int, float) or
+                    not math.isfinite(float(swing_speed_scale)) or swing_speed_scale <= 0.0):
+                raise ValueError("pcr_expert.swing_speed_scale must be positive and finite")
+            if (type(swing_apex_z_m) not in (int, float) or
+                    not math.isfinite(float(swing_apex_z_m)) or
+                    swing_apex_z_m <= -0.09 or swing_apex_z_m > 0.10):
+                raise ValueError("pcr_expert.swing_apex_z_m must be above the source stand-foot height and at most 0.10 m")
             if sensing.get("kind") != "legacy_simulator" or compensation is not None:
                 raise ValueError("pcr_expert uses raw simulator joint state without compensation")
         if not math.isclose(float(p["dt_s"]), 0.0025, abs_tol=1e-12) or not math.isclose(float(control_period), 0.02, abs_tol=1e-12) or cadence.steps_per_update != 8:
@@ -605,8 +616,16 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
     if openshc_executable is not None:
         resolved["resolved"]["openshc"] = openshc_source_provenance(PROJECT_ROOT, openshc_executable)
     if walk_backend == "pcr_expert":
-        resolved["resolved"]["pcr_expert"] = json.loads(
-            (PROJECT_ROOT / "third_party/pcr_expert/provenance.json").read_text())
+        pcr_provenance = json.loads((PROJECT_ROOT / "third_party/pcr_expert/provenance.json").read_text())
+        pcr_settings = config["pcr_expert"]
+        pcr_provenance["walk_parameterization"] = {
+            "swing_speed_scale": float(pcr_settings.get("swing_speed_scale", 1.0)),
+            "swing_apex_z_m": float(pcr_settings.get("swing_apex_z_m", 0.02)),
+            "swing_apex_frame": "hip/leg-local ExpertGround frame; swing_init_point z waypoint, not ground-clearance height",
+            "event_timing": "50 Hz ExpertGround stance-group transitions; full cycle spans two tripod switches",
+            "switch_timebase": "seconds since first active Expert tick (first tick is 0); not absolute simulator time",
+            "frequency_hz_and_duty_factor": "shared walk fields are unused by ExpertGround's event-driven gait"}
+        resolved["resolved"]["pcr_expert"] = pcr_provenance
     (out / "resolved_config.json").write_text(json.dumps(resolved, indent=2) + "\n")
 
     gym = sim = viewer = gymapi = None
@@ -783,7 +802,9 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
             pcr_expert = PcrExpertAdapter(
                 device="cpu", default_joint_angles=pcr_default_joint_angles(config),
                 link_lengths_m=config["pcr_expert"]["link_lengths_m"],
-                body_half_shape_m=config["pcr_expert"]["body_half_shape_m"])
+                body_half_shape_m=config["pcr_expert"]["body_half_shape_m"],
+                swing_speed_scale=config["pcr_expert"].get("swing_speed_scale", 1.0),
+                swing_apex_z_m=config["pcr_expert"].get("swing_apex_z_m", 0.02))
         import torch
         contact_tensor = gymtorch.wrap_tensor(gym.acquire_net_contact_force_tensor(sim))
         if not headless:
@@ -791,7 +812,19 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
             viewer = gym.create_viewer(sim, gymapi.CameraProperties())
             if viewer is None:
                 raise RuntimeError("failed to create viewer")
-            gym.viewer_camera_look_at(viewer, env, gymapi.Vec3(0.8, -0.8, 0.6), gymapi.Vec3(0, 0, start_z))
+            if mode == "walk":
+                initial_camera_xyz = (float(initial["base_xy_m"][0]),
+                                      float(initial["base_xy_m"][1]), start_z)
+                gym.viewer_camera_look_at(
+                    viewer, env,
+                    gymapi.Vec3(initial_camera_xyz[0] + 0.85,
+                                initial_camera_xyz[1] - 0.95,
+                                initial_camera_xyz[2] + 0.60),
+                    gymapi.Vec3(initial_camera_xyz[0], initial_camera_xyz[1] + 0.15,
+                                initial_camera_xyz[2]))
+            else:
+                gym.viewer_camera_look_at(viewer, env, gymapi.Vec3(0.8, -0.8, 0.6),
+                                          gymapi.Vec3(0, 0, start_z))
         _mark_initialization_stage(status_path, status, "running_physics")
         names = ["time_s", "root_x_m", "root_y_m", "root_z_m", "roll_rad", "pitch_rad", "yaw_rad",
                  "vx_m_s", "vy_m_s", "vz_m_s", "wx_rad_s", "wy_rad_s", "wz_rad_s", "contact_count",
@@ -1478,7 +1511,11 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
                                     "state_source": "measured_named_joint_position_and_velocity",
                                     "command_frame": "body axes; forward is +y",
                                     "reset_sent_at": "first post-gate control tick",
-                                    "gait_geometry_source": "vendored ExpertGround constants"}
+                                    "gait_geometry_source": "vendored ExpertGround constants",
+                                    "swing_speed_scale": pcr_expert.swing_speed_scale,
+                                    "swing_apex_z_m": pcr_expert.swing_apex_z_m,
+                                    "swing_apex_frame": "hip/leg-local ExpertGround frame; swing_init_point z waypoint, not ground-clearance height",
+                                    "walk_frequency_and_duty_unused": True}
                             gait_start_time = t
                             initial_walk_xyz = controller_xyz.copy()
                             initial_walk_truth_xyz = xyz.copy()
@@ -1531,6 +1568,14 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
                     stable = False
                     break
                 if cadence.is_tick(step):
+                    if mode == "walk":
+                        gym.viewer_camera_look_at(
+                            viewer, env,
+                            gymapi.Vec3(float(xyz[0]) + 0.85,
+                                        float(xyz[1]) - 0.95,
+                                        float(xyz[2]) + 0.60),
+                            gymapi.Vec3(float(xyz[0]), float(xyz[1]) + 0.15,
+                                        float(xyz[2])))
                     gym.step_graphics(sim)
                     gym.draw_viewer(viewer, sim, True)
                     gym.sync_frame_time(sim)
@@ -1601,6 +1646,18 @@ def run_stand(config_path: Union[str, Path], sim_device: Optional[str] = None, h
                            "joint_position_error_max_rad": q_error_max if q_error_values else None,
                            "torque_saturation_fraction": saturation_fraction,
                            "walk_sample_count": walk_samples})
+            if walk_backend == "pcr_expert" and pcr_expert is not None:
+                cycle_duration_sum = sum(pcr_expert.full_cycle_durations_s)
+                status.update({
+                    "pcr_expert_tripod_switch_count": pcr_expert.tripod_switch_count,
+                    "pcr_expert_tripod_switch_times_s": list(pcr_expert.tripod_switch_times_s),
+                    "pcr_expert_tripod_switch_timebase": "seconds since first active Expert tick (first tick is 0); not absolute simulator time",
+                    "pcr_expert_tripod_switch_groups": list(pcr_expert.tripod_switch_groups),
+                    "pcr_expert_full_cycle_durations_s": list(pcr_expert.full_cycle_durations_s),
+                    "pcr_expert_observed_full_cycle_frequency_hz": (
+                        len(pcr_expert.full_cycle_durations_s) / cycle_duration_sum
+                        if cycle_duration_sum > 0.0 else None),
+                    "pcr_expert_cycle_frequency_basis": "complete cycles measured between tripod switches two transitions apart; not nominal shared walk frequency"})
             acceptance_reasons = []
             if not stand_only:
                 if last_cycle_index < int(walk_settings["minimum_cycles"]):

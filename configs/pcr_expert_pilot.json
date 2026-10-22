@@ -137,6 +137,8 @@
     "body_half_shape_m": {
       "x": 0.1,
       "y": 0.22
-    }
+    },
+    "swing_speed_scale": 1.0,
+    "swing_apex_z_m": 0.02
   }
 }

@@ -1,6 +1,7 @@
 """Source parity and adapter contract for the standalone PCR ExpertGround backend."""
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import types
@@ -64,6 +65,8 @@ class PcrExpertTests(unittest.TestCase):
         self.assertEqual(self.config["control"]["effort_limit_nm"], 27.0)
         self.assertEqual(self.config["actuator"]["velocity_reference"], "zero")
         self.assertEqual(self.config["sensing"]["kind"], "legacy_simulator")
+        self.assertEqual(self.config["pcr_expert"]["swing_speed_scale"], 1.0)
+        self.assertEqual(self.config["pcr_expert"]["swing_apex_z_m"], 0.02)
 
     def test_vendored_controller_hashes_match_provenance_without_upstream_checkout(self):
         local = (PROJECT_ROOT / "third_party/pcr_expert/expert.py").read_text()
@@ -123,6 +126,116 @@ class PcrExpertTests(unittest.TestCase):
         adapter.step(q, dq, 0.0, 0.1, 0.0)
         self.assertTrue(adapter.reset_sent)
         self.assertEqual(adapter.tripod_switch_count, 0)
+        self.assertEqual(adapter._activity_tick, 2)
+
+    def test_swing_parameters_change_only_local_swing_waypoint_and_swing_motion(self):
+        defaults = pcr_default_joint_angles(self.config)
+        dq = {name: 0.0 for name in JOINT_ORDER}
+        base = PcrExpertAdapter("cpu", defaults, [0.072, 0.13, 0.17], {"x": 0.1, "y": 0.22})
+        faster = PcrExpertAdapter("cpu", defaults, [0.072, 0.13, 0.17], {"x": 0.1, "y": 0.22},
+                                  swing_speed_scale=2.0)
+        higher = PcrExpertAdapter("cpu", defaults, [0.072, 0.13, 0.17], {"x": 0.1, "y": 0.22},
+                                  swing_apex_z_m=0.04)
+        q = dict(defaults)
+        for adapter in (base, faster, higher):
+            adapter.step(q, dq, 0.2, 0.3, 0.1)
+
+        self.assertEqual(base.swing_speed_scale, 1.0)
+        self.assertEqual(base.swing_apex_z_m, 0.02)
+        self.assertGreater(0.02, float(base.expert.B_e_init[:, 2].max().item()))
+        np.testing.assert_array_equal(base.expert.R1_T_R.cpu().numpy(), faster.expert.R1_T_R.cpu().numpy())
+        np.testing.assert_array_equal(base.expert.R1_T_R_swing.cpu().numpy(),
+                                      faster.expert.R1_T_R_swing.cpu().numpy())
+        self.assertGreater(float(np.max(np.abs(base.expert.B_e_des.cpu().numpy() -
+                                               faster.expert.B_e_des.cpu().numpy()))), 1e-6)
+        base_waypoint = base.expert.swing_init_point.cpu().numpy()
+        higher_waypoint = higher.expert.swing_init_point.cpu().numpy()
+        np.testing.assert_array_equal(base_waypoint[:, :2], higher_waypoint[:, :2])
+        np.testing.assert_array_equal(base_waypoint[:, 2], np.full(6, 0.02, dtype=np.float32))
+        np.testing.assert_array_equal(higher_waypoint[:, 2], np.full(6, 0.04, dtype=np.float32))
+        self.assertTrue(bool(higher.expert.set_init_done[0].item()))
+        higher.step(q, dq, 0.2, 0.3, 0.1)
+        self.assertTrue(higher.reset_sent)
+        self.assertTrue(bool(higher.expert.set_init_done[0].item()))
+        np.testing.assert_array_equal(higher.expert.swing_init_point.cpu().numpy()[:, 2],
+                                      np.full(6, 0.04, dtype=np.float32))
+
+    def test_body_correction_matches_rigidly_transformed_dls_target_and_restores_planner(self):
+        import torch
+        from hexapod_body_compensation import SETTINGS
+
+        self._torch_threads = torch.get_num_threads()
+        torch.set_num_threads(1)
+        defaults = pcr_default_joint_angles(self.config)
+        dq = {name: 0.0 for name in JOINT_ORDER}
+        corrected = PcrExpertAdapter("cpu", defaults, [0.072, 0.13, 0.17], {"x": 0.1, "y": 0.22})
+        baseline = PcrExpertAdapter("cpu", defaults, [0.072, 0.13, 0.17], {"x": 0.1, "y": 0.22})
+        q = dict(defaults)
+        correction = {"roll_rad": 0.02, "pitch_rad": -0.015, "height_m": 0.006}
+        actual = corrected.step(q, dq, 0.0, 0.3, 0.0, body_correction=correction)
+        baseline.step(q, dq, 0.0, 0.3, 0.0)
+
+        expert = corrected.expert
+        np.testing.assert_array_equal(expert.B_e_des.cpu().numpy(), baseline.expert.B_e_des.cpu().numpy())
+        np.testing.assert_array_equal(expert.gaits.cpu().numpy(), baseline.expert.gaits.cpu().numpy())
+        np.testing.assert_array_equal(expert.swing_reach_point.cpu().numpy(),
+                                      baseline.expert.swing_reach_point.cpu().numpy())
+        np.testing.assert_array_equal(expert.R1_T_R.cpu().numpy(), baseline.expert.R1_T_R.cpu().numpy())
+        self.assertIs(expert.B_e_des_flat._base, expert.B_e_des)
+        self.assertIsNone(expert.body_correction)
+
+        roll, pitch, height = (correction["roll_rad"], correction["pitch_rad"], correction["height_m"])
+        cr, sr, cp, sp = math.cos(roll), math.sin(roll), math.cos(pitch), math.sin(pitch)
+        rx = torch.tensor([[1.0, 0.0, 0.0], [0.0, cr, -sr], [0.0, sr, cr]])
+        ry = torch.tensor([[cp, 0.0, sp], [0.0, 1.0, 0.0], [-sp, 0.0, cp]])
+        rotation = ry @ rx
+        feet = expert._B2R(expert.B_e_des).clone()
+        feet[..., :3] = (feet[..., :3] - torch.tensor([0.0, 0.0, height])) @ rotation
+        transformed = expert._R2B(feet)
+        q_tensor = torch.tensor([[q[name] for name in JOINT_ORDER]], dtype=torch.float32)
+        q_flat = q_tensor.view(-1, 3)
+        damped_inverse = expert.kin.DampInvJac(q_flat)
+        position_error = (transformed.view(-1, 4)[..., :3] - expert.B_e_cur_flat[..., :3]).unsqueeze(-1)
+        expected = q_flat + 32 * (damped_inverse @ position_error).squeeze(-1) * expert.dt
+        np.testing.assert_allclose([actual[name] for name in JOINT_ORDER], expected.reshape(18).numpy(),
+                                   rtol=1e-5, atol=1e-6)
+
+        actual_next = corrected.step(q, dq, 0.0, 0.3, 0.0)
+        baseline_next = baseline.step(q, dq, 0.0, 0.3, 0.0, body_correction={
+            "roll_rad": 0.0, "pitch_rad": 0.0, "height_m": 0.0})
+        np.testing.assert_array_equal([actual_next[name] for name in JOINT_ORDER],
+                                      [baseline_next[name] for name in JOINT_ORDER])
+        self.assertLessEqual(corrected.max_body_angle_rad, SETTINGS["max_angle_rad"])
+        self.assertLessEqual(corrected.max_body_height_m, SETTINGS["max_height_m"])
+
+    def test_body_correction_rejects_values_outside_existing_bounds(self):
+        defaults = pcr_default_joint_angles(self.config)
+        adapter = PcrExpertAdapter("cpu", defaults, [0.072, 0.13, 0.17], {"x": 0.1, "y": 0.22})
+        for correction in (
+                {"roll_rad": 0.051, "pitch_rad": 0.0, "height_m": 0.0},
+                {"roll_rad": 0.0, "pitch_rad": -0.051, "height_m": 0.0},
+                {"roll_rad": 0.0, "pitch_rad": 0.0, "height_m": 0.0101}):
+            with self.assertRaises(ValueError):
+                adapter._validated_body_correction(correction)
+        self.assertIsNone(adapter._validated_body_correction(
+            {"roll_rad": 0.0, "pitch_rad": 0.0, "height_m": 0.0}))
+        with self.assertRaises(ValueError):
+            PcrExpertAdapter("cpu", defaults, [0.072, 0.13, 0.17], {"x": 0.1, "y": 0.22},
+                             swing_apex_z_m=0.1001)
+
+    def test_switch_event_timing_distinguishes_half_switches_from_full_cycles(self):
+        defaults = pcr_default_joint_angles(self.config)
+        adapter = PcrExpertAdapter("cpu", defaults, [0.072, 0.13, 0.17], {"x": 0.1, "y": 0.22})
+        adapter._record_tripod_switch(1, 0.5)
+        adapter._record_tripod_switch(0, 1.0)
+        self.assertEqual(adapter.full_cycle_durations_s, [1.0])
+        adapter._record_tripod_switch(1, 1.5)
+        self.assertEqual(adapter.full_cycle_durations_s, [1.0])
+        adapter._record_tripod_switch(0, 2.5)
+        self.assertEqual(adapter.tripod_switch_times_s, [0.5, 1.0, 1.5, 2.5])
+        self.assertEqual(adapter.tripod_switch_groups, ["B", "A", "B", "A"])
+        self.assertEqual(adapter.full_cycle_durations_s, [1.0, 1.5])
+        self.assertAlmostEqual(adapter.observed_full_cycle_frequency_hz, 0.8)
 
     @unittest.skipUnless(UPSTREAM_EXPERT.is_file() and UPSTREAM_KINEMATIC.is_file(),
                          "upstream checkout is optional outside local parity validation")
