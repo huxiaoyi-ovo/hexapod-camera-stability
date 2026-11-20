@@ -50,12 +50,13 @@ class CameraPoseRecorder:
         self.samples.append((time, p_wc, r_wc, nominal.copy()))
 
     def save_twist_csv(self, filename):
+        """Create a twist log without replacing an existing recording."""
         if len(self.samples) < 3:
             raise ValueError('Need at least three camera poses')
         path = Path(filename)
         path.parent.mkdir(parents=True, exist_ok=True)
         fieldnames = ['t', *TWIST, *('nominal_'+k for k in TWIST)]
-        with path.open('w', newline='', encoding='utf-8') as f:
+        with path.open('x', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             for j, (t, p, r, nominal) in enumerate(self.samples):
