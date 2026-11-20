@@ -8,7 +8,7 @@ Usage: PYTHONPATH=src python scripts/build_pcr_sim_windows.py \\
 from pathlib import Path
 import argparse, json, sys
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
-from file_paths import validate_output_path
+from file_paths import atomic_output_path, validate_output_path
 from pcr_sim_windows import build_response_window,validate_pair_balance,write_response_windows
 
 def main():
@@ -35,7 +35,8 @@ def main():
             raise ValueError(f'Trial mismatch in entry {i}')
         rows.append(result)
     count=validate_pair_balance(rows)
-    write_response_windows(output,rows)
+    with atomic_output_path(output) as temporary:
+        write_response_windows(temporary, rows)
     print(f'Wrote {len(rows)} window labels from {count} off/on pairs -> {a.output}')
     print('Physical metrics: camera-geometry proxy only. Not actual RGB sharpness.')
 if __name__=='__main__':main()
