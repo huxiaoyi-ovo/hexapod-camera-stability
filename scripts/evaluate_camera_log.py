@@ -3,7 +3,7 @@
 import argparse, json, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
-from file_paths import validate_output_path
+from file_paths import atomic_output_path, validate_output_path
 from trace_metrics import read_trace, image_motion_metrics, camera_scene_from_json
 
 def main():
@@ -27,9 +27,10 @@ def main():
     output['camera_configuration'] = str(camera_path)
     output['interpretation'] = 'projected motion proxy only; NOT rendered or measured RGB blur'
     output['under_sampled_exposure'] = output['median_samples_per_exposure'] < 3
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(output, indent=2), encoding='utf-8')
-    print(json.dumps(output, indent=2))
+    contents = json.dumps(output, indent=2)
+    with atomic_output_path(output_path) as temporary:
+        temporary.write_text(contents, encoding='utf-8')
+    print(contents)
 
 if __name__ == '__main__':
     main()
