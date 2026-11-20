@@ -12,6 +12,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from closed_loop_surrogate import read_trials_csv, FixedCompensatorResponseModel
+from pcr_sim_windows import validate_pair_balance
 from sim_split import split_trials
 
 
@@ -22,6 +23,7 @@ def main():
     args=p.parse_args()
     try:
         train, test = split_trials(read_trials_csv(args.input), args.test_terrains)
+        validate_pair_balance(test)
     except ValueError as error:
         p.error(str(error))
     model=FixedCompensatorResponseModel(alpha=1.).fit(train)

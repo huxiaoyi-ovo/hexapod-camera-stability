@@ -81,11 +81,16 @@ def test_pair_rejects_false_seed_pairing():
         FixedCompensatorResponseModel().fit(rows)
 
 
-@pytest.mark.parametrize('heldout_pair', [0, 5])
-def test_evaluation_rejects_pairs_crossing_the_holdout_boundary(tmp_path, monkeypatch, heldout_pair):
+@pytest.mark.parametrize(('heldout_pair', 'conditions', 'error'), [
+    (0, (0, 1), 'Paired trials leaked across partitions'),
+    (5, (0, 1), None),
+    (5, (0,), 'Missing off/on trial'),
+    (5, (0, 1, 1), 'Duplicate controller_on=1 window'),
+])
+def test_evaluation_checks_heldout_pairs(tmp_path, monkeypatch, heldout_pair, conditions, error):
     monkeypatch.delenv('PYTHONPATH', raising=False)
     rows = [row(i, on) for i in range(5) for on in (0, 1)]
-    rows.extend(row(heldout_pair, on, 'HELD_OUT') for on in (0, 1))
+    rows.extend(row(heldout_pair, on, 'HELD_OUT') for on in conditions)
     path = tmp_path / 'windows.csv'
     with path.open('w', newline='', encoding='utf-8') as file:
         writer = csv.DictWriter(file, fieldnames=rows[0])
@@ -96,9 +101,9 @@ def test_evaluation_rejects_pairs_crossing_the_holdout_boundary(tmp_path, monkey
         [sys.executable, str(script), '--input', str(path), '--test-terrains', 'HELD_OUT'],
         cwd=tmp_path, capture_output=True, text=True,
     )
-    if heldout_pair == 0:
+    if error:
         assert result.returncode == 2
-        assert 'Paired trials leaked across partitions' in result.stderr
+        assert error in result.stderr
     else:
         assert result.returncode == 0, result.stderr
         assert result.stdout.count('heldout_windows=1') == 2
