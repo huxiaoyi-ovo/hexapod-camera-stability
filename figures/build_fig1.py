@@ -33,5 +33,6 @@ ax.text(.42,.29,'Conceptual method diagram — no experimental data',fontsize=8.
 fig.subplots_adjust(left=0,right=1,top=1,bottom=0)
 out=Path(__file__).parent
 fig.savefig(out/'Fig1_concept.png',dpi=220,facecolor='white')
-fig.savefig(out/'Fig1_concept.svg',facecolor='white')
+with matplotlib.rc_context({'svg.hashsalt': 'Fig1_concept'}):
+    fig.savefig(out/'Fig1_concept.svg',facecolor='white',metadata={'Date': None})
 print('Saved Fig1 files')
