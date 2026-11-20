@@ -1,6 +1,7 @@
 """Synthetic plumbing tests; never present as Isaac Gym validation."""
 import json
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 import numpy as np
 import pytest
@@ -58,6 +59,46 @@ def test_pcr_state_extracts_actual_root_and_contact():
 
 def test_pcr_state_no_silent_missing():
     with pytest.raises(AttributeError):read_hexground_state(SimpleNamespace(),0)
+
+
+def test_pcr_sim_tap_refuses_dangling_output_alias(tmp_path):
+    identity = TrialIdentity('rollout_off', 'pair0', 'flat', 1, False, 'gaitA')
+    target = tmp_path / 'unrelated.csv'
+    output = tmp_path / 'rollout.csv'
+    output.symlink_to(target)
+    with pytest.raises(FileExistsError):
+        PcrSimTap(output, identity)
+    assert not target.exists()
+
+
+@pytest.mark.parametrize('completed', [True, False])
+def test_pilot_reserves_status_while_trial_is_running(tmp_path, monkeypatch, completed):
+    integration = Path(__file__).resolve().parents[1] / 'integration' / 'pcrnet'
+    monkeypatch.syspath_prepend(str(integration))
+    import collect_camera_stable_gaits as pilot
+
+    monkeypatch.setattr(sys, 'argv', [
+        'pilot', '--pcr-root', str(tmp_path), '--output-root', str(tmp_path),
+        '--pair-id', 'pair0', '--controller', 'off',
+    ])
+    sidecar = tmp_path / 'pair0_off.status.json'
+
+    def run_trial(args):
+        started = sidecar.read_bytes()
+        assert json.loads(started)['status'] == 'started'
+        with pytest.raises(FileExistsError):
+            pilot.main()
+        assert sidecar.read_bytes() == started
+        if not completed:
+            raise RuntimeError('simulator failure')
+        return {'status': 'completed_raw_physics_trial'}
+
+    monkeypatch.setattr(pilot, 'run', run_trial)
+    assert pilot.main() == (0 if completed else 1)
+    status = json.loads(sidecar.read_bytes())
+    assert status['status'] == ('completed_raw_physics_trial' if completed else 'failed')
+    if not completed:
+        assert status['failure_reason'] == 'simulator failure'
 
 
 def test_nominal_body_to_camera_includes_lever_arm():

@@ -108,8 +108,6 @@ class PcrSimTap:
         self.identity = identity
         self.path = Path(output_csv)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        if self.path.exists():
-            raise FileExistsError(f'Refusing to overwrite existing rollout: {self.path}')
         if measured_contact_threshold_n < 0:
             raise ValueError('Bad contact threshold')
         self.threshold = float(measured_contact_threshold_n)
@@ -120,7 +118,7 @@ class PcrSimTap:
             if perm.shape != (6,) or set(perm.tolist()) != set(range(6)):
                 raise ValueError('Invalid canonical foot-contact permutation')
             self.feet_perm = perm
-        self.handle = self.path.open('w', newline='', encoding='utf-8')
+        self.handle = self.path.open('x', newline='', encoding='utf-8')
         self.writer = csv.DictWriter(self.handle, fieldnames=COLUMNS)
         self.writer.writeheader()
         self.last_time = None

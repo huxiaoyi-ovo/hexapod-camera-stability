@@ -127,20 +127,23 @@ def main():
     # Safe identity; never overwrite the previous trial's outcomes.
     args.output_root.mkdir(parents=True, exist_ok=True)
     sidecar = args.output_root / f'{args.pair_id}_{args.controller}.status.json'
-    if sidecar.exists():
-        raise FileExistsError(f'Status already exists: {sidecar}')
     info = {'status':'started','parameters':{k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()}}
-    try:
-        result = run(args)
-        info.update(result)
-        print(json.dumps(result, indent=2))
-        return 0
-    except Exception as exc:
-        info.update(status='failed', failure_type=type(exc).__name__, failure_reason=str(exc))
-        traceback.print_exc()
-        return 1
-    finally:
-        sidecar.write_text(json.dumps(info, indent=2, ensure_ascii=False)+'\n',encoding='utf-8')
+    with sidecar.open('x', encoding='utf-8') as status:
+        status.write(json.dumps(info, indent=2, ensure_ascii=False) + '\n')
+        status.flush()
+        try:
+            result = run(args)
+            info.update(result)
+            print(json.dumps(result, indent=2))
+            return 0
+        except Exception as exc:
+            info.update(status='failed', failure_type=type(exc).__name__, failure_reason=str(exc))
+            traceback.print_exc()
+            return 1
+        finally:
+            status.seek(0)
+            status.write(json.dumps(info, indent=2, ensure_ascii=False) + '\n')
+            status.truncate()
 
 
 if __name__=='__main__':
