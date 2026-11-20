@@ -95,13 +95,19 @@ def image_motion_metrics(t: np.ndarray, residual_camera_twist: np.ndarray,
     flow = residual @ L.T  # (T, 2*N), pixel/s
     n_features = len(scene.depth_m)
     w = scene.weights / np.sum(scene.weights)
-    starts = np.arange(t[0], t[-1] - camera.frame_interval_s + 1e-12,
-                       camera.frame_interval_s)
-    if len(starts) < 1:
+    # Relative time keeps the frame grid precise for absolute ROS timestamps.
+    # Allow endpoint rounding up to one representable absolute timestamp step.
+    resolution = max(abs(np.spacing(t[0])), abs(np.spacing(t[-1])))
+    t = t - t[0]
+    period = camera.frame_interval_s
+    tolerance = min(period / 2, max(1e-12, resolution))
+    n_frames = int(np.floor((t[-1] + tolerance) / period))
+    if n_frames < 1:
         raise ValueError('Trace duration must cover at least one camera frame')
+    starts = np.arange(n_frames) * period
     jitter2 = []; trace2 = []; net2 = []; peaks = []; dens = []
     for start in starts:
-        end = start + camera.frame_interval_s
+        end = start + period
         tf, vf = _interval_samples(t, flow, start, end)
         frame_disp = trapezoid(vf, tf, axis=0).reshape(n_features, 2)
         jitter2.append(float(np.sum(w * np.sum(frame_disp**2, axis=1))))
@@ -115,7 +121,7 @@ def image_motion_metrics(t: np.ndarray, residual_camera_twist: np.ndarray,
         peaks.append(float(np.max(path_length)))
         dens.append(int(np.count_nonzero((t >= start) & (t <= exp_end))))
     return ImageMotionMetrics(
-        n_samples=len(t), n_frames=len(starts), duration_s=float(t[-1]-t[0]),
+        n_samples=len(t), n_frames=n_frames, duration_s=float(t[-1]),
         jitter_px_rms_per_frame=float(np.sqrt(np.mean(jitter2))),
         exposure_trace_px_rms=float(np.sqrt(np.mean(trace2))),
         exposure_net_displacement_px_rms=float(np.sqrt(np.mean(net2))),
