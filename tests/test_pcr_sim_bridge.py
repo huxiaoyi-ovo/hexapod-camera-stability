@@ -130,6 +130,8 @@ def test_off_on_pair_coverage(tmp_path):
     assert validate_pair_balance([a,b])==1
     with pytest.raises(ValueError,match='Missing off/on'):
         validate_pair_balance([a])
+    with pytest.raises(ValueError, match='Duplicate controller_on=0 window'):
+        validate_pair_balance([a, b, a])
 
 
 def test_group_split_keeps_pair_together():

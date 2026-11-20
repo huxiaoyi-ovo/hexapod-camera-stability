@@ -138,7 +138,11 @@ def validate_pair_balance(rows):
     seen={}
     for r in rows:
         key=(r['terrain_instance_id'],r['seed'],r['pair_id'],r['gait_id'])
-        seen.setdefault(key,set()).add(int(r['controller_on']))
+        condition = int(r['controller_on'])
+        conditions = seen.setdefault(key, set())
+        if condition in conditions:
+            raise ValueError(f'Duplicate controller_on={condition} window for pair {key}')
+        conditions.add(condition)
     missing=[k for k,v in seen.items() if v!={0,1}]
     if missing:
         raise ValueError(f'Missing off/on trial for {len(missing)} pairs')
