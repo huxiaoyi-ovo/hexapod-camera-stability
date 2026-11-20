@@ -24,15 +24,18 @@ def main():
     try:
         train, test = split_trials(read_trials_csv(args.input), args.test_terrains)
         validate_pair_balance(test)
+        measured = np.array([row['measured_jitter_px_frame'] for row in test], dtype=float)
+        if not np.isfinite(measured).all() or np.any(measured < 0):
+            raise ValueError('Held-out measured jitter must be finite and nonnegative')
     except ValueError as error:
         p.error(str(error))
     model=FixedCompensatorResponseModel(alpha=1.).fit(train)
+    conditions = np.array([int(row['controller_on']) for row in test])
     for enabled in (0,1):
-        rows=[r for r in test if int(r['controller_on'])==enabled]
-        if not rows:
-            raise SystemExit(f'Held-out data lacks controller_on={enabled} samples')
+        mask = conditions == enabled
+        rows = [row for row, matches in zip(test, mask) if matches]
         pred=np.array([model.predict(row).closed_loop_jitter_px if enabled else model.predict(row).raw_jitter_px for row in rows])
-        true=np.array([float(row['measured_jitter_px_frame']) for row in rows])
+        true = measured[mask]
         # Error is reported over WINDOW rows, NOT independent experiment trials.
         mae=float(np.mean(np.abs(pred-true)))
         print(f'condition={"on" if enabled else "off"} heldout_windows={len(rows)} MAE_px_frame={mae:.4f}')
