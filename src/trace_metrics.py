@@ -87,7 +87,7 @@ def image_motion_metrics(t: np.ndarray, residual_camera_twist: np.ndarray,
     residual = np.asarray(residual_camera_twist, dtype=float)
     if t.ndim != 1 or residual.shape != (len(t), 6) or len(t) < 3:
         raise ValueError('t(N), residual(N,6), N>=3 required')
-    if np.any(np.diff(t) <= 0) or not np.isfinite(residual).all():
+    if not np.isfinite(t).all() or np.any(np.diff(t) <= 0) or not np.isfinite(residual).all():
         raise ValueError('Invalid time or residual arrays')
     if camera.exposure_s > camera.frame_interval_s + 1e-12:
         raise ValueError('Exposure cannot exceed frame period in this frame model')
