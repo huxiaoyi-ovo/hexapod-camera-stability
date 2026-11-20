@@ -168,4 +168,7 @@ class PcrSimTap:
         return self
 
     def __exit__(self, exc_type, exc_value, exc_tb):
-        self.handle.close()
+        if exc_type is None:
+            self.close()
+        else:
+            self.handle.close()
