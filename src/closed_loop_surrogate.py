@@ -26,7 +26,7 @@ INPUT_NAMES = (
     'previous_touchdown_softness', 'time_since_gait_change_s',
 )
 REQUIRED = INPUT_NAMES + (
-    'pair_id', 'terrain_instance_id', 'controller_on',
+    'pair_id', 'terrain_instance_id', 'seed', 'gait_id', 'controller_on',
     'measured_jitter_px_frame', 'measured_speed_mps',
 )
 
