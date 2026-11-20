@@ -26,7 +26,11 @@ def validate_pair(output_root, pair_id):
         parameters = payload['parameters']
         if parameters['pair_id'] != pair_id or parameters['controller'] != condition:
             raise RuntimeError(f'Trial identity does not match {status_path}')
-        trace=Path(payload['csv'])
+        trace_name = Path(payload['csv']).name
+        if trace_name != f'{pair_id}_{condition}.csv':
+            raise RuntimeError(f'Trace filename does not match {status_path}')
+        # A collection can be moved from the simulator to the analysis machine.
+        trace = status_path.with_name(trace_name)
         if not trace.is_file():
             raise FileNotFoundError(trace)
         outputs.append((parameters,trace))
