@@ -81,16 +81,21 @@ def test_pair_rejects_false_seed_pairing():
         FixedCompensatorResponseModel().fit(rows)
 
 
-@pytest.mark.parametrize(('heldout_pair', 'conditions', 'error'), [
-    (0, (0, 1), 'Paired trials leaked across partitions'),
-    (5, (0, 1), None),
-    (5, (0,), 'Missing off/on trial'),
-    (5, (0, 1, 1), 'Duplicate controller_on=1 window'),
+@pytest.mark.parametrize(('heldout_pair', 'conditions', 'bad_jitter', 'error'), [
+    (0, (0, 1), None, 'Paired trials leaked across partitions'),
+    (5, (0, 1), None, None),
+    (5, (0,), None, 'Missing off/on trial'),
+    (5, (0, 1, 1), None, 'Duplicate controller_on=1 window'),
+    (5, (0, 1), 'nan', 'Held-out measured jitter must be finite and nonnegative'),
+    (5, (0, 1), 'inf', 'Held-out measured jitter must be finite and nonnegative'),
+    (5, (0, 1), '-1', 'Held-out measured jitter must be finite and nonnegative'),
 ])
-def test_evaluation_checks_heldout_pairs(tmp_path, monkeypatch, heldout_pair, conditions, error):
+def test_evaluation_checks_heldout_rows(tmp_path, monkeypatch, heldout_pair, conditions, bad_jitter, error):
     monkeypatch.delenv('PYTHONPATH', raising=False)
     rows = [row(i, on) for i in range(5) for on in (0, 1)]
     rows.extend(row(heldout_pair, on, 'HELD_OUT') for on in conditions)
+    if bad_jitter is not None:
+        rows[-1]['measured_jitter_px_frame'] = bad_jitter
     path = tmp_path / 'windows.csv'
     with path.open('w', newline='', encoding='utf-8') as file:
         writer = csv.DictWriter(file, fieldnames=rows[0])
@@ -104,6 +109,7 @@ def test_evaluation_checks_heldout_pairs(tmp_path, monkeypatch, heldout_pair, co
     if error:
         assert result.returncode == 2
         assert error in result.stderr
+        assert 'MAE_px_frame' not in result.stdout
     else:
         assert result.returncode == 0, result.stderr
         assert result.stdout.count('heldout_windows=1') == 2
