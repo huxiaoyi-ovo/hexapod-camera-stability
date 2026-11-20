@@ -3,6 +3,7 @@
 import argparse, json, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+from file_paths import validate_output_path
 from trace_metrics import read_trace, image_motion_metrics, camera_scene_from_json
 
 def main():
@@ -13,12 +14,10 @@ def main():
     args = p.parse_args()
     trace_path = args.trace.resolve()
     camera_path = args.camera.resolve()
-    output_path = args.output.resolve()
-    for input_path in (trace_path, camera_path):
-        if output_path == input_path or (
-            output_path.exists() and input_path.exists() and output_path.samefile(input_path)
-        ):
-            p.error(f'Output would overwrite input: {input_path}')
+    try:
+        output_path = validate_output_path(args.output, (trace_path, camera_path))
+    except ValueError as error:
+        p.error(str(error))
 
     t, actual, nominal = read_trace(trace_path)
     camera, scene = camera_scene_from_json(camera_path)
