@@ -1,5 +1,8 @@
 """Analytical invariant tests. These are NOT robot experimental results."""
 import csv
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -52,5 +55,33 @@ class TestTraceMetrics(unittest.TestCase):
             self.assertTrue(np.allclose(a[:,0],.1,atol=1e-12))
             self.assertTrue(np.allclose(a[:,3:],0,atol=1e-12))
             self.assertTrue(np.allclose(a,n,atol=1e-12))
+
+    def test_evaluation_output_cannot_replace_inputs(self):
+        repo = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            recorder = CameraPoseRecorder([0, 0, 0], [0, 0, 0, 1])
+            for t in (0, 0.05, 0.1):
+                recorder.append(t, [0, 0, 0], [0, 0, 0, 1], [0] * 6)
+            trace = recorder.save_twist_csv(directory / 'trace.csv')
+            camera = directory / 'camera.json'
+            shutil.copyfile(repo / 'templates/camera_scene.example.json', camera)
+            alias = directory / 'trace-alias.csv'
+            alias.hardlink_to(trace)
+            before = [path.read_bytes() for path in (trace, camera)]
+            command = [
+                sys.executable, str(repo / 'scripts/evaluate_camera_log.py'),
+                '--trace', str(trace), '--camera', str(camera), '--output',
+            ]
+            for output in (trace, camera, alias):
+                with self.subTest(output=output):
+                    result = subprocess.run(command + [str(output)], capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn('Output would overwrite input', result.stderr)
+                    self.assertEqual([path.read_bytes() for path in (trace, camera)], before)
+
+            output = directory / 'results' / 'metrics.json'
+            subprocess.run(command + [str(output)], check=True, capture_output=True)
+            self.assertTrue(output.is_file())
 
 if __name__=='__main__': unittest.main()
