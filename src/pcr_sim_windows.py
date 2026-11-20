@@ -96,13 +96,18 @@ def build_response_window(log_path, predecision, calibration_path, window_start_
         cam_twist.append(np.r_[v,w])
     residual=np.stack(cam_twist)-np.stack([s[3] for s in recorder.samples])
     metrics=image_motion_metrics(t,residual,cam,scene)
-    # Signed progress along initially commanded world-frame direction;
-    # not absolute path length, which would reward slipping sideways.
-    body_dir=np.array([cmd[0,0],cmd[0,1],0.])
-    if np.linalg.norm(body_dir[:2])<1e-8:
+    # Measure signed progress along the first nonzero planar command.
+    # The PhysX pilot can start its speed ramp with a zero command.
+    moving = np.flatnonzero(np.linalg.norm(cmd[:, :2], axis=1) >= 1e-8)
+    if not moving.size:
         raise ValueError('This first-stage protocol requires forward translation')
-    desired_world=Rotation.from_quat(root[0,3:7]).apply(body_dir)[:2]
-    desired_world/=np.linalg.norm(desired_world)
+    first = moving[0]
+    body_dir = np.r_[cmd[first, :2], 0.]
+    desired_world = Rotation.from_quat(root[first, 3:7]).apply(body_dir)[:2]
+    horizontal_speed = np.linalg.norm(desired_world)
+    if horizontal_speed < 1e-8 * np.linalg.norm(body_dir):
+        raise ValueError('Initial translation command has no horizontal world projection')
+    desired_world /= horizontal_speed
     actual_progress=float((root[-1,0:2]-root[0,0:2])@desired_world)
     actual_speed=max(0.,actual_progress/float(t[-1]-t[0]))
     feature_keys=set(INPUT_NAMES)
