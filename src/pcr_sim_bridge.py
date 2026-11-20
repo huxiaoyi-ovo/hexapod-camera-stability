@@ -23,6 +23,17 @@ def _array(x):
     return np.asarray(x, dtype=float)
 
 
+def _foot_indices(raw):
+    values = _array(raw)
+    if (values.shape != (6,) or not np.isfinite(values).all()
+            or np.any(values < 0) or np.any(values != np.floor(values))):
+        raise ValueError('Expected six distinct nonnegative integer foot indices')
+    indices = [int(value) for value in values]
+    if len(set(indices)) != 6:
+        raise ValueError('Expected six distinct nonnegative integer foot indices')
+    return indices
+
+
 def read_hexground_state(env, env_id: int = 0) -> dict:
     """Read actual Isaac Gym state tensors, with no silent zero fallback."""
     required = ('root_states', 'dof_pos', 'dof_vel', 'torques',
@@ -34,13 +45,13 @@ def read_hexground_state(env, env_id: int = 0) -> dict:
     q = _array(env.dof_pos[env_id]).reshape(-1)
     dq = _array(env.dof_vel[env_id]).reshape(-1)
     torque = _array(env.torques[env_id]).reshape(-1)
-    indices = _array(env.feet_indices).astype(int)
+    indices = _foot_indices(env.feet_indices)
     contacts = _array(env.contact_forces[env_id])
     if root.shape != (13,) or q.shape != (18,) or dq.shape != (18,) or torque.shape != (18,):
         raise ValueError('Expected root (13), joint states (18), and torque (18)')
-    if indices.shape != (6,) or contacts.ndim != 2 or contacts.shape[1] != 3:
-        raise ValueError('Expected six foot indices and 3D contact-force array')
-    if np.any(indices < 0) or np.any(indices >= len(contacts)):
+    if contacts.ndim != 2 or contacts.shape[1] != 3:
+        raise ValueError('Expected 3D contact-force array')
+    if max(indices) >= len(contacts):
         raise ValueError('Foot rigid-body indices outside contact tensor')
     values = np.r_[root, q, dq, torque, contacts[indices].ravel()]
     if not np.isfinite(values).all():
@@ -59,9 +70,7 @@ def canonical_toe_permutation(env, env_id: int = 0):
     if not all(hasattr(env, x) for x in ('gym', 'envs', 'actor_handles', 'feet_indices')):
         raise AttributeError('Cannot verify PCR toe rigid-body identity')
     from pcr_urdf_ik import LEG_ORDER
-    handle_to_slot = {int(x): i for i, x in enumerate(_array(env.feet_indices).astype(int))}
-    if len(handle_to_slot) != 6:
-        raise ValueError('Foot handles are not six distinct rigid bodies')
+    handle_to_slot = {handle: slot for slot, handle in enumerate(_foot_indices(env.feet_indices))}
     perm = []
     for leg in LEG_ORDER:
         handle = int(env.gym.find_actor_rigid_body_handle(
@@ -114,10 +123,10 @@ class PcrSimTap:
         if canonical_feet_permutation is None:
             self.feet_perm = np.arange(6, dtype=int)  # legacy caller, unchecked
         else:
-            perm = np.asarray(canonical_feet_permutation, dtype=int)
-            if perm.shape != (6,) or set(perm.tolist()) != set(range(6)):
+            permutation = _foot_indices(canonical_feet_permutation)
+            if set(permutation) != set(range(6)):
                 raise ValueError('Invalid canonical foot-contact permutation')
-            self.feet_perm = perm
+            self.feet_perm = np.array(permutation, dtype=int)
         self.handle = self.path.open('x', newline='', encoding='utf-8')
         self.writer = csv.DictWriter(self.handle, fieldnames=COLUMNS)
         self.writer.writeheader()
