@@ -97,6 +97,11 @@ def image_interaction_matrix(camera: Camera, scene: TrackedScene) -> np.ndarray:
     scenes are NOT accounted for; these require separate validation.
     """
     scene.validate()
+    intrinsics_and_timing = (
+        camera.fx, camera.fy, camera.cx, camera.cy, camera.exposure_s, camera.frame_interval_s,
+    )
+    if not np.isfinite(intrinsics_and_timing).all():
+        raise ValueError('Camera intrinsics and timing must be finite')
     if camera.fx <= 0 or camera.fy <= 0 or camera.exposure_s <= 0 or camera.frame_interval_s <= 0:
         raise ValueError('camera intrinsics/exposure/frame interval must be positive')
     x = (scene.uv[:, 0] - camera.cx) / camera.fx

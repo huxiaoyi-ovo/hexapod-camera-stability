@@ -1,5 +1,6 @@
 """Analytical invariant tests. These are NOT robot experimental results."""
 import csv
+from dataclasses import replace
 import shutil
 import subprocess
 import sys
@@ -22,6 +23,19 @@ class TestTraceMetrics(unittest.TestCase):
         r = image_motion_metrics(self.t, np.zeros((len(self.t),6)), self.cam,self.scene)
         self.assertAlmostEqual(r.jitter_px_rms_per_frame,0,places=10)
         self.assertAlmostEqual(r.exposure_trace_px_rms,0,places=10)
+
+    def test_metrics_reject_nonfinite_sample_time(self):
+        t = self.t.copy()
+        t[len(t) // 2] = np.nan
+        with self.assertRaisesRegex(ValueError, 'Invalid time or residual arrays'):
+            image_motion_metrics(t, np.zeros((len(t), 6)), self.cam, self.scene)
+
+    def test_metrics_reject_nonfinite_camera_parameters(self):
+        for field in ('fx', 'fy', 'cx', 'cy', 'exposure_s', 'frame_interval_s'):
+            with self.subTest(parameter=field):
+                camera = replace(self.cam, **{field: np.nan})
+                with self.assertRaisesRegex(ValueError, 'intrinsics and timing must be finite'):
+                    image_motion_metrics(self.t, np.zeros((len(self.t), 6)), camera, self.scene)
 
     def test_constant_translation_matches_projection(self):
         d=np.zeros((len(self.t),6)); d[:,0]=.1
