@@ -37,3 +37,17 @@ def test_reused_input_buffers_do_not_change_calibration_or_old_samples():
     recorder.append(1.0, [0, 0, 0], IDENTITY, nominal)
     assert [sample[1][0] for sample in recorder.samples] == [.1, .1]
     assert [sample[3][0] for sample in recorder.samples] == [0, .3]
+
+
+def test_twist_recorder_cannot_overwrite_existing_raw_log(tmp_path):
+    recorder = CameraPoseRecorder([0, 0, 0], IDENTITY)
+    for t in (0., .05, .10):
+        recorder.append(t, [t, 0, 0], IDENTITY, [0] * 6)
+    path = tmp_path / 'raw.csv'
+    recorder.save_twist_csv(path)
+    original = path.read_bytes()
+
+    recorder.append(.15, [.3, 0, 0], IDENTITY, [0] * 6)
+    with pytest.raises(FileExistsError):
+        recorder.save_twist_csv(path)
+    assert path.read_bytes() == original
