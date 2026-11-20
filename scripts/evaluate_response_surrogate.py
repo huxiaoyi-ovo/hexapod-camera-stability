@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """Train on REAL trial CSV; hold out complete terrain instances, print predictions only.
 
-Usage: PYTHONPATH=src python scripts/evaluate_response_surrogate.py \
+Usage: python scripts/evaluate_response_surrogate.py \
   --input path/to/real_response_windows.csv --test-terrains heldout_01 heldout_02
 """
 import argparse
+from pathlib import Path
+import sys
+
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from closed_loop_surrogate import read_trials_csv, FixedCompensatorResponseModel
+from sim_split import split_trials
 
 
 def main():
@@ -14,14 +20,10 @@ def main():
     p.add_argument('--input', required=True)
     p.add_argument('--test-terrains', nargs='+', required=True)
     args=p.parse_args()
-    all_rows=read_trials_csv(args.input)
-    held=set(args.test_terrains)
-    train=[r for r in all_rows if r['terrain_instance_id'] not in held]
-    test=[r for r in all_rows if r['terrain_instance_id'] in held]
-    if not train or not test:
-        raise SystemExit('Need nonempty training and held-out terrain groups')
-    # Do not split paired controller-on/off windows between train and test.
-    # Grouping terrain_instance_id ensures this if the IDs are stable.
+    try:
+        train, test = split_trials(read_trials_csv(args.input), args.test_terrains)
+    except ValueError as error:
+        p.error(str(error))
     model=FixedCompensatorResponseModel(alpha=1.).fit(train)
     for enabled in (0,1):
         rows=[r for r in test if int(r['controller_on'])==enabled]
