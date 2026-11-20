@@ -7,20 +7,29 @@ from trace_metrics import read_trace, image_motion_metrics, camera_scene_from_js
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--trace', required=True, help='CSV with actual/nominal optical twists')
-    p.add_argument('--camera', required=True, help='JSON scene and camera calibration')
-    p.add_argument('--output', required=True, help='Output JSON, never overwrites raw logs')
+    p.add_argument('--trace', type=Path, required=True, help='CSV with actual/nominal optical twists')
+    p.add_argument('--camera', type=Path, required=True, help='JSON scene and camera calibration')
+    p.add_argument('--output', type=Path, required=True, help='Output JSON, never overwrites inputs')
     args = p.parse_args()
-    t, actual, nominal = read_trace(args.trace)
-    camera, scene = camera_scene_from_json(args.camera)
+    trace_path = args.trace.resolve()
+    camera_path = args.camera.resolve()
+    output_path = args.output.resolve()
+    for input_path in (trace_path, camera_path):
+        if output_path == input_path or (
+            output_path.exists() and input_path.exists() and output_path.samefile(input_path)
+        ):
+            p.error(f'Output would overwrite input: {input_path}')
+
+    t, actual, nominal = read_trace(trace_path)
+    camera, scene = camera_scene_from_json(camera_path)
     result = image_motion_metrics(t, actual-nominal, camera, scene)
     output = result.to_dict()
-    output['source_trace'] = str(Path(args.trace).resolve())
-    output['camera_configuration'] = str(Path(args.camera).resolve())
+    output['source_trace'] = str(trace_path)
+    output['camera_configuration'] = str(camera_path)
     output['interpretation'] = 'projected motion proxy only; NOT rendered or measured RGB blur'
     output['under_sampled_exposure'] = output['median_samples_per_exposure'] < 3
-    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-    Path(args.output).write_text(json.dumps(output, indent=2), encoding='utf-8')
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(output, indent=2), encoding='utf-8')
     print(json.dumps(output, indent=2))
 
 if __name__ == '__main__':
