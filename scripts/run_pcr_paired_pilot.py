@@ -23,15 +23,20 @@ def validate_pair(output_root, pair_id):
         payload=json.loads(status_path.read_text(encoding='utf-8'))
         if payload['status'] != 'completed_raw_physics_trial':
             raise RuntimeError(f'Failed/unfinished trial: {status_path}')
+        parameters = payload['parameters']
+        if parameters['pair_id'] != pair_id or parameters['controller'] != condition:
+            raise RuntimeError(f'Trial identity does not match {status_path}')
         trace=Path(payload['csv'])
         if not trace.is_file():
             raise FileNotFoundError(trace)
-        outputs.append((payload,trace))
+        outputs.append((parameters,trace))
     left,right=outputs
-    for field in ('pair_id','terrain_instance','seed','frequency_hz',
-                  'duty_factor','swing_height','touchdown_softness','forward_mps'):
-        if left[0]['parameters'][field]!=right[0]['parameters'][field]:
+    for field in ('terrain_instance','task','seed','steps','frequency_hz','duty_factor',
+                  'swing_height','touchdown_softness','forward_mps','ramp_s','sim_device'):
+        if left[0][field]!=right[0][field]:
             raise RuntimeError(f'Mismatched paired trial configuration: {field}')
+    if left[1].samefile(right[1]):
+        raise RuntimeError('Paired trials must have separate trace files')
     return [str(v[1]) for v in outputs]
 
 
