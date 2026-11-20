@@ -13,10 +13,17 @@ from scipy.spatial.transform import Rotation
 from trace_metrics import TWIST
 
 
+def _single_rotation(quat_xyzw):
+    quat = np.asarray(quat_xyzw, dtype=float)
+    if quat.shape != (4,) or not np.isfinite(quat).all():
+        raise ValueError('Quaternion must be a finite shape-(4,) xyzw vector')
+    return Rotation.from_quat(quat)
+
+
 class CameraPoseRecorder:
     def __init__(self, base_to_camera_position_m, base_to_camera_quat_xyzw):
-        self.p_bc = np.asarray(base_to_camera_position_m, float)
-        self.r_bc = Rotation.from_quat(base_to_camera_quat_xyzw)
+        self.p_bc = np.array(base_to_camera_position_m, dtype=float, copy=True)
+        self.r_bc = _single_rotation(base_to_camera_quat_xyzw)
         if self.p_bc.shape != (3,) or not np.isfinite(self.p_bc).all():
             raise ValueError('base_to_camera_position_m must be 3 finite floats')
         self.samples = []
@@ -27,16 +34,20 @@ class CameraPoseRecorder:
         nominal_camera_twist: expected smooth 6D motion in camera optical
         frame, provided by reference trajectory; MUST NOT be unknown/None.
         """
+        time = float(t_s)
+        if not np.isfinite(time):
+            raise ValueError('Sampling time must be finite')
+        if self.samples and time <= self.samples[-1][0]:
+            raise ValueError('Sampling times must increase')
         p = np.asarray(base_position_world_m, float)
-        r = Rotation.from_quat(base_quat_xyzw)
         nominal = np.asarray(nominal_camera_twist, float)
-        if p.shape != (3,) or nominal.shape != (6,) or not np.isfinite(nominal).all():
+        if (p.shape != (3,) or not np.isfinite(p).all()
+                or nominal.shape != (6,) or not np.isfinite(nominal).all()):
             raise ValueError('Bad base position or nominal twist')
+        r = _single_rotation(base_quat_xyzw)
         p_wc = p + r.apply(self.p_bc)
         r_wc = r * self.r_bc
-        if self.samples and t_s <= self.samples[-1][0]:
-            raise ValueError('Sampling times must increase')
-        self.samples.append((float(t_s), p_wc, r_wc, nominal))
+        self.samples.append((time, p_wc, r_wc, nominal.copy()))
 
     def save_twist_csv(self, filename):
         if len(self.samples) < 3:
