@@ -6,8 +6,18 @@ def split_trials(rows, heldout_terrain_ids):
     ids=set(heldout_terrain_ids)
     if not ids:
         raise ValueError('Explicit heldout terrain IDs required')
-    train=[r for r in rows if r['terrain_instance_id'] not in ids]
-    test=[r for r in rows if r['terrain_instance_id'] in ids]
+    train, test = [], []
+    found = set()
+    for row in rows:
+        terrain = row['terrain_instance_id']
+        if terrain in ids:
+            test.append(row)
+            found.add(terrain)
+        else:
+            train.append(row)
+    missing = ids - found
+    if missing:
+        raise ValueError(f'Unknown held-out terrain IDs: {sorted(missing)}')
     if not train or not test:
         raise ValueError('Train and heldout test must both be nonempty')
     # Off/on pairs may not be split between train and test; impossible given
